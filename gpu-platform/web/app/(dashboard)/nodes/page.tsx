@@ -2,6 +2,7 @@
 import Link from "next/link";
 import { useState, useMemo, useRef, useEffect } from "react";
 import { useNodes, useGPUs, useWorkloads, useIssueEnrollmentToken } from "@/lib/queries";
+import { API_BASE_ORIGIN } from "@/lib/api-client";
 import { Server, RefreshCw, Loader2, CheckCircle2 } from "lucide-react";
 import {
   PageHeader, Card, Table, Row, Cell, Badge, Button, EmptyState, CopyButton, Meter,
@@ -14,8 +15,8 @@ function deriveHealth(status: string, lastSeen: string | null): string {
   return Date.now() - new Date(lastSeen).getTime() < 90_000 ? "healthy" : "stale";
 }
 
-// Control-plane origin (strip the /api/v1 suffix) — where install.sh is served.
-const CP_ORIGIN = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080/api/v1").replace(/\/api\/v1\/?$/, "");
+// Control-plane origin (the /api/v1 suffix stripped) — where install.sh is served.
+const CP_ORIGIN = API_BASE_ORIGIN;
 
 function EnrollPanel({ token, enrolledNodeName }: { token: string; enrolledNodeName?: string }) {
   const installCmd = `curl -fsSL ${CP_ORIGIN}/install.sh | sh -s -- --token ${token}`;
