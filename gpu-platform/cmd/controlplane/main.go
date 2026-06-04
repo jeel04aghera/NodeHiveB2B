@@ -46,6 +46,18 @@ func main() {
 	}
 
 	ctx := context.Background()
+
+	// Apply pending schema migrations before opening the pool. Idempotent and how
+	// the schema is created in container/Railway deployments (which only run the
+	// binary). Skip with RUN_MIGRATIONS=false if migrations are managed externally.
+	if os.Getenv("RUN_MIGRATIONS") != "false" {
+		if err := db.Migrate(cfg.DB.URL); err != nil {
+			log.Error("migrate", "err", err)
+			os.Exit(1)
+		}
+		log.Info("database migrations applied")
+	}
+
 	pool, err := db.Open(ctx, cfg.DB.URL)
 	if err != nil {
 		log.Error("database", "err", err)

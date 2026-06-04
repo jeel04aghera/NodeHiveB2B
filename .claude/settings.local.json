@@ -128,7 +128,9 @@
       "Bash(python3 -c 'import sys,json;d=json.load\\(sys.stdin\\);print\\(\"node_id:\",d.get\\(\"node_id\"\\),\"| enroll_token_hash:\",repr\\(d.get\\(\"enroll_token_hash\"\\)\\)\\)')",
       "Bash(pkill -f \"exe/agent\")",
       "Bash(npx tsc *)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(awk '{print $1}')",
+      "Bash(echo \"BUILD EXIT: $?\")"
     ]
   }
 }
