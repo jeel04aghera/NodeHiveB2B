@@ -11,6 +11,7 @@ import { useAuth } from "@/lib/auth";
 import { useDeploymentConfig, useAlerts } from "@/lib/queries";
 import { useOrgProfile } from "@/lib/org";
 import { cn } from "@/components/ui";
+export const dynamic = 'force-dynamic';
 
 type NavItem = { href: string; label: string; icon: React.ElementType; match?: (path: string, tab: string | null) => boolean };
 type NavGroup = { heading?: string; items: NavItem[] };
