@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+// GPU telemetry samples streamed by the agent. Operational data; the control
+// plane writes these to the partitioned gpu_metrics table.
+package nodehive.metrics.v1;
+
+option go_package = "github.com/nodehive/gpu-platform/gen/go/metrics/v1;metricsv1";
+
+import "google/protobuf/timestamp.proto";
+
+message GpuMetricSample {
+  string gpu_uuid = 1;
+  google.protobuf.Timestamp ts = 2;
+  float util_pct = 3;     // 0-100, GPU SM utilization
+  uint32 mem_used_mb = 4;
+  float power_w = 5;
+  float temp_c = 6;
+  uint32 sm_clock_mhz = 7;
+  uint32 ecc_errors = 8;
+  uint32 proc_count = 9;  // processes currently using the GPU
+}
+
+// A batch is sent every sample interval to amortize network overhead.
+message MetricsBatch {
+  repeated GpuMetricSample samples = 1;
+}

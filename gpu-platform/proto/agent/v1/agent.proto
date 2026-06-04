@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+// The agent <-> control-plane contract. The agent always dials out: it calls
+// Enroll once, then holds a single bidirectional Connect stream. No inbound RPCs
+// are ever made to the agent.
+package nodehive.agent.v1;
+
+option go_package = "github.com/nodehive/gpu-platform/gen/go/agent/v1;agentv1";
+
+import "google/protobuf/timestamp.proto";
+import "node/v1/node.proto";
+import "metrics/v1/metrics.proto";
+import "workload/v1/workload.proto";
+
+service AgentService {
+  // One-time: exchange a short-lived enrollment token for a durable credential.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+
+  // Steady state: persistent, agent-initiated bidirectional stream carrying all
+  // telemetry (agent->server) and all commands (server->agent).
+  rpc Connect(stream AgentMessage) returns (stream ServerMessage);
+}
+
+message EnrollRequest {
+  string enrollment_token = 1;
+  nodehive.node.v1.NodeInfo node = 2;
+  string public_key = 3;       // server binds the issued credential to this key
+  uint32 protocol_version = 4;
+  string fingerprint = 5;      // stable hardware id; re-enroll updates the same node
+}
+
+message EnrollResponse {
+  string node_id = 1;
+  string credential = 2;       // signed token or client cert (dev: opaque string)
+}
+
+message Heartbeat {
+  google.protobuf.Timestamp ts = 1;
+  string agent_version = 2;
+  bool healthy = 3;
+  uint32 gpu_count = 4;
+  float mean_util_pct = 5;
+}
+
+message CommandResult {
+  string command_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+// agent -> server
+message AgentMessage {
+  oneof payload {
+    Heartbeat heartbeat = 1;
+    nodehive.node.v1.Inventory inventory = 2;
+    nodehive.metrics.v1.MetricsBatch metrics = 3;
+    nodehive.workload.v1.WorkloadStatus workload_status = 4;
+    CommandResult command_result = 5;
+  }
+}
+
+// server -> agent (the complete command allowlist; anything else is rejected)
+message ServerMessage {
+  string command_id = 1;
+  oneof payload {
+    LaunchWorkload launch = 2;
+    StopWorkload stop = 3;
+    GetInventory get_inventory = 4;
+    UpdateAgent update = 5;
+  }
+}
+
+message LaunchWorkload { nodehive.workload.v1.WorkloadSpec spec = 1; }
+message StopWorkload {
+  string workload_id = 1;
+  nodehive.workload.v1.StopReason reason = 2;
+}
+message GetInventory {}
+message UpdateAgent {
+  string target_version = 1;
+  string signed_url = 2;
+  string signature = 3;
+}

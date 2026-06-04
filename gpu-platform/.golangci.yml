@@ -1,0 +1,35 @@
+# Startup-simple linter config: strict enough to catch real bugs, not pedantic.
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - gofmt
+    - goimports
+    - revive
+    - bodyclose
+    - sqlclosecheck
+    - misspell
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+    - path: gen/        # never lint generated code
+      linters:
+        - all
+
+linters-settings:
+  goimports:
+    local-prefixes: github.com/nodehive/gpu-platform
+  revive:
+    rules:
+      - name: exported
+        disabled: true   # don't require godoc on every export during V1

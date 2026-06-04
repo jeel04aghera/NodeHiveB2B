@@ -1,0 +1,16 @@
+# air hot-reload config for the control plane.
+# Usage: air -c .air.controlplane.toml
+root = "."
+tmp_dir = "tmp"
+
+[build]
+cmd = "go build -o tmp/controlplane ./cmd/controlplane"
+bin = "tmp/controlplane"
+delay = 1000
+exclude_dir = ["web", "bin", "tmp", "gen"]
+include_ext = ["go"]
+kill_delay = "200ms"
+log = "build-errors.log"
+
+[log]
+time = true

@@ -1,0 +1,13 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Secrets / local env — never commit
+.env
+**/.env
+**/.gpu-agent/
+
+# (gpu-platform/.gitignore handles Go/Node build + generated artifacts)

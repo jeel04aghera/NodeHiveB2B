@@ -1,0 +1,56 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  proto:
+    name: Proto lint + breaking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: bufbuild/buf-action@v1
+        with:
+          lint: true
+          breaking: true
+          breaking_against: "https://github.com/nodehive/gpu-platform.git#branch=main"
+
+  backend:
+    name: Go lint + test + build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: gpu, POSTGRES_PASSWORD: gpu, POSTGRES_DB: gpu }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gpu" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+    env:
+      DB_URL: postgres://gpu:gpu@localhost:5432/gpu?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.23" }
+      - run: make tools
+      - run: make generate
+      - run: go mod tidy && git diff --exit-code go.mod go.sum   # deps must be tidy
+      - name: Migration validation
+        run: goose -dir migrations postgres "$DB_URL" up && goose -dir migrations postgres "$DB_URL" down-to 0
+      - run: make lint
+      - run: make test
+      - run: make build
+
+  web:
+    name: Frontend lint + build
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: web } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: "npm", cache-dependency-path: web/package-lock.json }
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build

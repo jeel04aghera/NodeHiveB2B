@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+// Workload lifecycle types. The control plane decides placement and sends a
+// WorkloadSpec; the agent runs it and reports WorkloadStatus.
+package nodehive.workload.v1;
+
+option go_package = "github.com/nodehive/gpu-platform/gen/go/workload/v1;workloadv1";
+
+import "google/protobuf/timestamp.proto";
+
+enum WorkloadState {
+  WORKLOAD_STATE_UNSPECIFIED = 0;
+  WORKLOAD_STATE_PENDING = 1;
+  WORKLOAD_STATE_RUNNING = 2;
+  WORKLOAD_STATE_STOPPING = 3;
+  WORKLOAD_STATE_STOPPED = 4;
+  WORKLOAD_STATE_FAILED = 5;
+}
+
+enum StopReason {
+  STOP_REASON_UNSPECIFIED = 0;
+  STOP_REASON_USER = 1;
+  STOP_REASON_IDLE_RECLAIM = 2;
+  STOP_REASON_ADMIN = 3;
+  STOP_REASON_FAILURE = 4;
+}
+
+// What to run. gpu_uuids are chosen by control-plane first-fit placement.
+message WorkloadSpec {
+  string workload_id = 1;
+  string image = 2;
+  uint32 gpu_count = 3;
+  repeated string gpu_uuids = 4;
+  uint32 idle_timeout_sec = 5; // 0 = no auto-stop
+  map<string, string> env = 6;
+  bool expose_ssh = 7;
+  bool expose_jupyter = 8;
+}
+
+// Reported by the agent as the workload progresses.
+message WorkloadStatus {
+  string workload_id = 1;
+  WorkloadState state = 2;
+  string ssh_endpoint = 3;
+  string jupyter_endpoint = 4;
+  string message = 5;
+  StopReason stop_reason = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}

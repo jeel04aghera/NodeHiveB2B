@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+// Shared node + GPU description types. Imported by agent/v1 and workload/v1.
+package nodehive.node.v1;
+
+option go_package = "github.com/nodehive/gpu-platform/gen/go/node/v1;nodev1";
+
+import "google/protobuf/timestamp.proto";
+
+enum NodeStatus {
+  NODE_STATUS_UNSPECIFIED = 0;
+  NODE_STATUS_ONLINE = 1;
+  NODE_STATUS_OFFLINE = 2;
+  NODE_STATUS_DEGRADED = 3; // enrolled but missing driver/DCGM, etc.
+}
+
+enum GpuStatus {
+  GPU_STATUS_UNSPECIFIED = 0;
+  GPU_STATUS_HEALTHY = 1;
+  GPU_STATUS_UNHEALTHY = 2;
+  GPU_STATUS_IN_USE = 3;
+  GPU_STATUS_IDLE = 4;
+}
+
+// Hardware + software facts about a node, reported by the agent at discovery.
+message NodeInfo {
+  string hostname = 1;
+  string os = 2;
+  string kernel = 3;
+  string cpu_model = 4;
+  uint32 cpu_cores = 5;
+  uint64 ram_mb = 6;
+  string nvidia_driver = 7;
+  string cuda_version = 8;
+  string agent_version = 9;
+  map<string, string> labels = 10;
+}
+
+// A single physical GPU on a node. `uuid` is the stable identity across reboots.
+message GpuInfo {
+  uint32 index = 1;
+  string uuid = 2;
+  string model = 3;
+  uint64 memory_mb = 4;
+  bool mig_enabled = 5;
+}
+
+// Full inventory snapshot pushed on connect and on hardware change.
+message Inventory {
+  NodeInfo node = 1;
+  repeated GpuInfo gpus = 2;
+  google.protobuf.Timestamp collected_at = 3;
+}

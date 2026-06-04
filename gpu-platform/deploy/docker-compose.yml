@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gpu
+      POSTGRES_PASSWORD: gpu
+      POSTGRES_DB: gpu
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gpu"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  adminer:
+    image: adminer:4
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  controlplane:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      DATABASE_URL: postgres://gpu:gpu@postgres:5432/gpu?sslmode=disable
+      HTTP_ADDR: ":8080"
+      GRPC_ADDR: ":9090"
+      GRPC_INSECURE: "true"
+      JWT_SECRET: "change-me-in-production"
+      DEV_ORG_SLUG: "dev"
+      DEV_ENROLLMENT_TOKEN: "dev-enroll-token"
+      DEV_BOOTSTRAP_ADMIN: "admin@dev.local:admin123"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - full # opt-in: `docker compose --profile full up`
+
+  web:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ../web:/app
+    ports:
+      - "3000:3000"
+    command: sh -c "npm install && npm run dev"
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: "http://localhost:8080/api/v1"
+    profiles:
+      - full
+
+volumes:
+  pgdata:

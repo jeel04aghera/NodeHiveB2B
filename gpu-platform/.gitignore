@@ -1,0 +1,32 @@
+# Go
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Generated code (produced by `make generate`)
+/gen/
+/internal/db/sqlc/
+
+# Env / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Node / Next.js
+/web/node_modules/
+/web/.next/
+/web/out/
+/web/.turbo/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local data
+/tmp/
+/data/

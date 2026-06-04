@@ -1,0 +1,12 @@
+FROM golang:1.23-alpine AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/nodehive-agent ./cmd/agent
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata
+# docker CLI for the executor (injected at runtime on the host, or via docker-in-docker)
+COPY --from=builder /bin/nodehive-agent /bin/nodehive-agent
+ENTRYPOINT ["/bin/nodehive-agent"]
