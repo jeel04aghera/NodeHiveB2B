@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useMemo } from "react";
+import { Suspense, useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
@@ -123,7 +123,7 @@ const STATUS_TABS = [
   { key: "failed", label: "Failed" }, { key: "stopped", label: "Stopped" },
 ];
 
-export default function WorkloadsPage() {
+function WorkloadsContent() {
   const search = useSearchParams();
   const { data: workloads, isLoading, error, refetch } = useWorkloads();
   const { data: templates } = useTemplates();
@@ -390,5 +390,13 @@ export default function WorkloadsPage() {
         </Modal>
       )}
     </div>
+  );
+}
+
+export default function WorkloadsPage() {
+  return (
+    <Suspense fallback={null}>
+      <WorkloadsContent />
+    </Suspense>
   );
 }

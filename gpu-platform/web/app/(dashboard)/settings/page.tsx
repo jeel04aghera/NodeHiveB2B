@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   useRates, useSetRate, useUsers, useCreateUser, useIssueEnrollmentToken,
@@ -23,7 +23,7 @@ const TABS = [
   { key: "enrollment", label: "Node Enrollment" },
 ];
 
-export default function SettingsPage() {
+function SettingsContent() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const router = useRouter();
@@ -272,5 +272,13 @@ export default function SettingsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function SettingsPage() {
+  return (
+    <Suspense fallback={null}>
+      <SettingsContent />
+    </Suspense>
   );
 }
