@@ -19,6 +19,11 @@ type Service interface {
 	// Register creates a brand-new organization with an admin user and returns a session.
 	Register(ctx context.Context, orgName, email, name, password string) (token string, user domain.User, err error)
 	Authenticate(ctx context.Context, token string) (domain.User, error)
+	// UpsertGoogleUser logs in / links / creates a user from a verified Google identity.
+	// The returned user may have OrgID == uuid.Nil (onboarding required).
+	UpsertGoogleUser(ctx context.Context, sub, email, name, avatar string, emailVerified bool) (token string, user domain.User, err error)
+	// CreateOrgForUser provisions an org for a pre-onboarding user and makes them admin.
+	CreateOrgForUser(ctx context.Context, userID uuid.UUID, orgName string) (token string, user domain.User, err error)
 	CreateUser(ctx context.Context, orgID uuid.UUID, email, name string, role domain.Role) (domain.User, error)
 	ListUsers(ctx context.Context, orgID uuid.UUID) ([]domain.User, error)
 

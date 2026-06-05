@@ -81,11 +81,13 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   const org = useOrgProfile();
 
   useEffect(() => {
-    if (ready && !user) router.replace("/login");
+    if (!ready) return;
+    if (!user) router.replace("/login");
+    else if (user.onboarded === false) router.replace("/onboarding"); // pre-onboarding (no org yet)
   }, [ready, user, router]);
 
   if (!ready) return <div className="min-h-screen bg-canvas" />;
-  if (!user) return null;
+  if (!user || user.onboarded === false) return null;
 
   return (
     <div className="flex min-h-screen bg-canvas text-ink">

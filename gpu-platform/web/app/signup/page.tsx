@@ -6,6 +6,7 @@ import { useAuth } from "@/lib/auth";
 import { ApiError } from "@/lib/api-client";
 import { saveOrgProfile } from "@/lib/org";
 import { Button, Input, FormField, Select } from "@/components/ui";
+import { GoogleButton } from "@/components/GoogleButton";
 import { Check, ArrowRight, Boxes, Activity, Receipt } from "lucide-react";
 
 const STEPS = ["Create account", "Create organization", "Enter dashboard"];
@@ -99,6 +100,10 @@ export default function SignupPage() {
               <div>
                 <h2 className="text-xl font-semibold tracking-tight text-ink">Create your account</h2>
                 <p className="mt-1 text-sm text-ink-muted">Start running GPU workloads in minutes.</p>
+              </div>
+              <GoogleButton label="Sign up with Google" />
+              <div className="flex items-center gap-3 text-xs text-ink-subtle">
+                <div className="h-px flex-1 bg-line" />or<div className="h-px flex-1 bg-line" />
               </div>
               <FormField label="Full name"><Input value={account.name} onChange={(e) => setAccount({ ...account, name: e.target.value })} placeholder="Jane Smith" required autoFocus /></FormField>
               <FormField label="Work email"><Input type="email" value={account.email} onChange={(e) => setAccount({ ...account, email: e.target.value })} placeholder="you@company.com" required /></FormField>

@@ -177,7 +177,19 @@
       "Bash(ruby -ryaml -e 'd=YAML.load_file\\(\".github/workflows/release.yml\"\\); puts \"parsed OK\"; puts \"keys: #{d.keys.inspect}\"; puts \"defaults: #{d[\"defaults\"].inspect}\"')",
       "Bash(git -C /Users/jeelaghera/Downloads/Koala remote get-url origin)",
       "Bash(echo \"git remote: $\\(git -C /Users/jeelaghera/Downloads/Koala remote get-url origin\\)\")",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(pkill -f \"/tmp/agent\")",
+      "Bash(sed -n '45,70p' internal/workloads/workloads.go)",
+      "Bash(sed -n '55,80p' internal/workloads/events.go)",
+      "Bash(sed -n '85,100p' internal/workloads/queue.go)",
+      "Bash(sed -n '148,160p' internal/workloads/queue.go)",
+      "Bash(sed -n '460,470p' internal/httpapi/router.go)",
+      "Bash(git mv *)",
+      "Bash(ENV=production JWT_SECRET=a-strong-32char-secret-value-1234 DEV_BOOTSTRAP_ADMIN=admin@dev.local:admin123 DEV_ENROLLMENT_TOKEN=dev-enroll-token DATABASE_URL=postgres://gpu:gpu@localhost:5432/gpu?sslmode=disable GRPC_INSECURE=true /tmp/cp)",
+      "Bash(curl -s -o /dev/null -w \"login admin@dev.local -> HTTP %{http_code}\\\\n\" -X POST http://localhost:8080/api/v1/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"admin@dev.local\",\"password\":\"admin123\"}')",
+      "Bash(git -C .. log --oneline -6)",
+      "Bash(git -C .. status --short)",
+      "Bash(grep -n 'deleteAlertRule\\\\|return r$' internal/httpapi/router.go)"
     ]
   }
 }

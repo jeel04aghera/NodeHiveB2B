@@ -65,17 +65,23 @@ type Organization struct {
 }
 
 type User struct {
-	ID           uuid.UUID
-	OrgID        uuid.UUID
-	DepartmentID *uuid.UUID
-	Email        string
-	PasswordHash string
-	Name         string
-	Role         Role
-	Status       string
-	LastLoginAt  *time.Time
-	CreatedAt    time.Time
+	ID            uuid.UUID
+	OrgID         uuid.UUID // uuid.Nil = pre-onboarding (Google user with no org yet)
+	DepartmentID  *uuid.UUID
+	Email         string
+	PasswordHash  string
+	Name          string
+	Role          Role
+	Status        string
+	AvatarURL     string
+	EmailVerified bool
+	AuthProvider  string // 'password' | 'google'
+	LastLoginAt   *time.Time
+	CreatedAt     time.Time
 }
+
+// Onboarded reports whether the user has joined/created an organization.
+func (u User) Onboarded() bool { return u.OrgID != uuid.Nil }
 
 // EnrollmentToken is an agent-enrollment credential record (raw token never stored).
 type EnrollmentToken struct {
@@ -135,21 +141,21 @@ type Template struct {
 
 // Node is the aggregate root for the Fleet context (Node + its GPUs).
 type Node struct {
-	ID            uuid.UUID
-	OrgID         uuid.UUID
-	Hostname      string
-	Status        NodeStatus
-	OS            string
-	Kernel        string
-	CPUModel      string
-	CPUCores      int
-	RAMMB         int64
-	NvidiaDriver  string
-	CUDAVersion   string
-	AgentVersion  string
-	Labels        map[string]string
-	EnrolledAt    time.Time
-	LastSeenAt    *time.Time
+	ID           uuid.UUID
+	OrgID        uuid.UUID
+	Hostname     string
+	Status       NodeStatus
+	OS           string
+	Kernel       string
+	CPUModel     string
+	CPUCores     int
+	RAMMB        int64
+	NvidiaDriver string
+	CUDAVersion  string
+	AgentVersion string
+	Labels       map[string]string
+	EnrolledAt   time.Time
+	LastSeenAt   *time.Time
 }
 
 type GPU struct {
@@ -239,13 +245,13 @@ type RateCard struct {
 }
 
 type AgentHeartbeat struct {
-	ID        int64
-	OrgID     uuid.UUID
-	NodeID    uuid.UUID
-	TS        time.Time
-	Status    string
-	AgentVer  string
-	Summary   map[string]any
+	ID       int64
+	OrgID    uuid.UUID
+	NodeID   uuid.UUID
+	TS       time.Time
+	Status   string
+	AgentVer string
+	Summary  map[string]any
 }
 
 type AuditLog struct {

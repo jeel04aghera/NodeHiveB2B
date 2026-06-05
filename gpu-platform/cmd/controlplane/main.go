@@ -140,6 +140,10 @@ func main() {
 		Handler: httpapi.NewRouter(
 			nodeSvc, identitySvc, inventorySvc,
 			workloadsSvc, telemetrySvc, billingSvc, auditSvc, policySvc, opsSvc,
+			httpapi.WithGoogleOAuth(identity.NewGoogleOAuth(cfg.Google.ClientID, cfg.Google.ClientSecret, cfg.Google.RedirectURL)),
+			httpapi.WithAppBaseURL(cfg.AppBaseURL),
+			httpapi.WithCORSOrigins(cfg.CORSAllowedOrigins),
+			httpapi.WithSecureCookies(!cfg.IsDev()),
 		),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

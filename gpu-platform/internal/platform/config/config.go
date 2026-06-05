@@ -25,15 +25,30 @@ type AuthConfig struct {
 	SessionTTL time.Duration
 }
 
+// GoogleOAuthConfig holds the credentials for "Sign in with Google". OAuth is enabled
+// only when ClientID, ClientSecret and RedirectURL are all set.
+type GoogleOAuthConfig struct {
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string // API callback, e.g. https://<api>/api/v1/auth/google/callback
+}
+
+func (g GoogleOAuthConfig) Enabled() bool {
+	return g.ClientID != "" && g.ClientSecret != "" && g.RedirectURL != ""
+}
+
 type Config struct {
 	Env                string // "development" or "production" (default). Gates dev bootstrap + secret checks.
 	DB                 DBConfig
 	HTTP               HTTPConfig
 	GRPC               GRPCConfig
 	Auth               AuthConfig
-	DevOrgSlug         string // org that dev nodes enroll into (matches scripts/seed_dev.sql)
-	DevEnrollmentToken string // if set AND dev mode, control plane seeds this token on startup
-	DevBootstrapAdmin  string // email:password to seed on first run (dev mode only)
+	Google             GoogleOAuthConfig
+	AppBaseURL         string   // frontend origin the OAuth callback redirects back to
+	CORSAllowedOrigins []string // explicit allow-list; empty => permissive "*" (dev only, no credentials)
+	DevOrgSlug         string   // org that dev nodes enroll into (matches scripts/seed_dev.sql)
+	DevEnrollmentToken string   // if set AND dev mode, control plane seeds this token on startup
+	DevBootstrapAdmin  string   // email:password to seed on first run (dev mode only)
 }
 
 func Load() (Config, error) {
@@ -50,6 +65,13 @@ func Load() (Config, error) {
 			KeyFile:  env("GRPC_KEY_FILE", ""),
 		},
 		Auth: AuthConfig{JWTSecret: env("JWT_SECRET", "dev-only-change-me"), SessionTTL: envDur("SESSION_TTL", 24*time.Hour)},
+		Google: GoogleOAuthConfig{
+			ClientID:     env("GOOGLE_CLIENT_ID", ""),
+			ClientSecret: env("GOOGLE_CLIENT_SECRET", ""),
+			RedirectURL:  env("GOOGLE_REDIRECT_URL", ""),
+		},
+		AppBaseURL:         strings.TrimRight(env("APP_BASE_URL", ""), "/"),
+		CORSAllowedOrigins: splitNonEmpty(env("CORS_ALLOWED_ORIGINS", "")),
 		DevOrgSlug:         env("DEV_ORG_SLUG", "dev"),
 		DevEnrollmentToken: env("DEV_ENROLLMENT_TOKEN", "dev-enroll-token"),
 		DevBootstrapAdmin:  env("DEV_BOOTSTRAP_ADMIN", "admin@dev.local:admin123"),
@@ -151,6 +173,17 @@ func env(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// splitNonEmpty splits a comma-separated list, trimming spaces and dropping blanks.
+func splitNonEmpty(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func envBool(k string, def bool) bool {

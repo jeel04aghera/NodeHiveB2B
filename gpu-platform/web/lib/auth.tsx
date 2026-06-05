@@ -4,10 +4,13 @@ import { api, setToken, ApiError } from "./api-client";
 
 export interface CurrentUser {
   id: string;
-  org_id: string;
+  org_id: string | null;
   email: string;
   name: string;
   role: string;
+  avatar_url?: string;
+  auth_provider?: string;
+  onboarded?: boolean;
 }
 
 interface AuthCtx {
@@ -15,6 +18,10 @@ interface AuthCtx {
   ready: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (input: { orgName: string; name: string; email: string; password: string }) => Promise<void>;
+  // loginWithToken adopts a token minted out-of-band (the Google OAuth callback).
+  loginWithToken: (token: string) => Promise<CurrentUser>;
+  // createOrg provisions an org for a pre-onboarding user and adopts the new session.
+  createOrg: (orgName: string) => Promise<CurrentUser>;
   logout: () => void;
 }
 
@@ -67,6 +74,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(r.user);
   }
 
+  async function loginWithToken(token: string): Promise<CurrentUser> {
+    localStorage.setItem(KEY, token);
+    setToken(token);
+    const u = await api<CurrentUser>("/me");
+    setUser(u);
+    return u;
+  }
+
+  async function createOrg(orgName: string): Promise<CurrentUser> {
+    const r = await api<{ token: string; user: CurrentUser }>("/onboarding/organization", {
+      method: "POST",
+      body: JSON.stringify({ org_name: orgName }),
+    });
+    localStorage.setItem(KEY, r.token);
+    setToken(r.token);
+    setUser(r.user);
+    return r.user;
+  }
+
   function logout() {
     localStorage.removeItem(KEY);
     setToken(null);
@@ -74,7 +100,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <Ctx.Provider value={{ user, ready, login, register, logout }}>
+    <Ctx.Provider value={{ user, ready, login, register, loginWithToken, createOrg, logout }}>
       {children}
     </Ctx.Provider>
   );

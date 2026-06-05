@@ -5,7 +5,15 @@ import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { ApiError } from "@/lib/api-client";
 import { Button, Input, FormField } from "@/components/ui";
+import { GoogleButton } from "@/components/GoogleButton";
 import { Boxes, Activity, Receipt, ShieldCheck } from "lucide-react";
+
+const OAUTH_ERRORS: Record<string, string> = {
+  invalid_state: "Sign-in expired or was interrupted. Please try again.",
+  missing_code: "Google did not return an authorization code. Please try again.",
+  exchange_failed: "Could not verify your Google sign-in. Please try again.",
+  account_error: "We couldn't sign you in with Google. Your email may be unverified.",
+};
 
 const CAPABILITIES = [
   { icon: Boxes, title: "Self-serve GPU workloads", desc: "Launch containers with SSH or JupyterLab in seconds." },
@@ -21,7 +29,11 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => { if (user) router.replace("/overview"); }, [user, router]);
+  useEffect(() => { if (user) router.replace(user.onboarded === false ? "/onboarding" : "/overview"); }, [user, router]);
+  useEffect(() => {
+    const code = new URLSearchParams(window.location.search).get("error");
+    if (code) setError(OAUTH_ERRORS[code] ?? "Sign-in failed. Please try again.");
+  }, []);
   if (user) return null;
 
   async function handleSubmit(e: React.FormEvent) {
@@ -85,7 +97,12 @@ export default function LoginPage() {
           <h2 className="text-xl font-semibold tracking-tight text-ink">Sign in to NodeHive</h2>
           <p className="mt-1 text-sm text-ink-muted">Use your organization account to continue.</p>
 
-          <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+          <div className="mt-6"><GoogleButton /></div>
+          <div className="my-4 flex items-center gap-3 text-xs text-ink-subtle">
+            <div className="h-px flex-1 bg-line" />or<div className="h-px flex-1 bg-line" />
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-4">
             <FormField label="Email"><Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" required autoFocus /></FormField>
             <FormField label="Password"><Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" required /></FormField>
             {error && <p className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs leading-relaxed text-red-400">{error}</p>}

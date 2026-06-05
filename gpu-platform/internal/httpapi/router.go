@@ -36,7 +36,28 @@ type API struct {
 	audit     audit.Service
 	policy    policy.Service
 	ops       *ops.Service
+
+	// Auth/OAuth (Phase 1) — set via options; zero values disable the feature.
+	google        *identity.GoogleOAuth
+	appBaseURL    string   // frontend origin the OAuth callback redirects back to
+	corsOrigins   []string // explicit allow-list; empty => permissive "*" (dev, no creds)
+	secureCookies bool     // Secure + SameSite=None (cross-origin prod); false => Lax (local)
 }
+
+// Option configures optional API features without breaking existing NewRouter callers.
+type Option func(*API)
+
+// WithGoogleOAuth enables "Sign in with Google" (nil = disabled).
+func WithGoogleOAuth(g *identity.GoogleOAuth) Option { return func(a *API) { a.google = g } }
+
+// WithAppBaseURL sets the frontend origin the OAuth callback redirects back to.
+func WithAppBaseURL(u string) Option { return func(a *API) { a.appBaseURL = u } }
+
+// WithCORSOrigins sets the explicit CORS allow-list (enables credentialed requests).
+func WithCORSOrigins(o []string) Option { return func(a *API) { a.corsOrigins = o } }
+
+// WithSecureCookies emits Secure + SameSite=None cookies (cross-origin production).
+func WithSecureCookies(b bool) Option { return func(a *API) { a.secureCookies = b } }
 
 func NewRouter(
 	nodesSvc *nodes.Service,
@@ -48,6 +69,7 @@ func NewRouter(
 	auditSvc audit.Service,
 	policySvc policy.Service,
 	opsSvc *ops.Service,
+	opts ...Option,
 ) http.Handler {
 	a := &API{
 		nodes:     nodesSvc,
@@ -60,12 +82,15 @@ func NewRouter(
 		policy:    policySvc,
 		ops:       opsSvc,
 	}
+	for _, opt := range opts {
+		opt(a)
+	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(corsMiddleware)
+	r.Use(a.corsMiddleware)
 
 	// Agent distribution (public): one-line installer + prebuilt binaries.
 	r.Get("/install.sh", a.installScript)
@@ -78,88 +103,99 @@ func NewRouter(
 		r.Post("/auth/login", a.login)
 		r.Post("/auth/register", a.register)
 
+		// Google OAuth (public). Handlers no-op with 404 when OAuth isn't configured.
+		r.Get("/auth/google/start", a.googleStart)
+		r.Get("/auth/google/callback", a.googleCallback)
+
 		// Authenticated routes
 		r.Group(func(r chi.Router) {
 			r.Use(a.authMiddleware)
 
+			// Pre-onboarding users (no org yet) may ONLY reach these:
 			r.Get("/me", a.me)
-			r.Get("/config", a.config) // deployment mode (dev banner, synthetic flags)
+			r.Post("/onboarding/organization", a.onboardingCreateOrg)
 
-			// Nodes
-			r.Get("/nodes", a.listNodes)
-			r.Get("/nodes/{id}", a.getNode)
-			r.Get("/nodes/{id}/gpus", a.listNodeGPUs)
+			// Everything below requires the user to belong to an org (post-onboarding).
+			r.Group(func(r chi.Router) {
+				r.Use(a.requireOrg)
+				r.Get("/config", a.config) // deployment mode (dev banner, synthetic flags)
 
-			// GPUs
-			r.Get("/gpus", a.listGPUs)
+				// Nodes
+				r.Get("/nodes", a.listNodes)
+				r.Get("/nodes/{id}", a.getNode)
+				r.Get("/nodes/{id}/gpus", a.listNodeGPUs)
 
-			// Templates (environment registry)
-			r.Get("/templates", a.listTemplates)
-			r.Get("/templates/{id}", a.getTemplate)
-			r.Post("/templates", a.createTemplate) // admin
+				// GPUs
+				r.Get("/gpus", a.listGPUs)
 
-			// Workloads
-			r.Get("/workloads", a.listWorkloads)
-			r.Post("/workloads", a.launchWorkload)
-			r.Get("/workloads/{id}", a.getWorkload)
-			r.Post("/workloads/{id}/stop", a.stopWorkload)
-			r.Get("/workloads/{id}/events", a.workloadEvents)
-			r.Get("/workloads/{id}/logs", a.workloadLogs)
-			r.Get("/queue", a.queue) // F3 — GPU queue dashboard
+				// Templates (environment registry)
+				r.Get("/templates", a.listTemplates)
+				r.Get("/templates/{id}", a.getTemplate)
+				r.Post("/templates", a.createTemplate) // admin
 
-			// Metrics
-			r.Get("/metrics/summary", a.fleetSummary)
-			r.Get("/metrics/utilization", a.utilization)
-			r.Get("/metrics/idle", a.idleReport)
+				// Workloads
+				r.Get("/workloads", a.listWorkloads)
+				r.Post("/workloads", a.launchWorkload)
+				r.Get("/workloads/{id}", a.getWorkload)
+				r.Post("/workloads/{id}/stop", a.stopWorkload)
+				r.Get("/workloads/{id}/events", a.workloadEvents)
+				r.Get("/workloads/{id}/logs", a.workloadLogs)
+				r.Get("/queue", a.queue) // F3 — GPU queue dashboard
 
-			// Billing
-			r.Get("/billing/chargeback", a.chargeback)
-			r.Get("/billing/chargeback.csv", a.chargebackCSV)
-			r.Get("/billing/rates", a.listRates)
-			r.Post("/billing/rates", a.setRate)
-			r.Get("/billing/credits", a.creditSummary)
-			r.Get("/billing/ledger", a.creditLedger)
-			r.Post("/billing/credits/topup", a.topupCredits)
+				// Metrics
+				r.Get("/metrics/summary", a.fleetSummary)
+				r.Get("/metrics/utilization", a.utilization)
+				r.Get("/metrics/idle", a.idleReport)
 
-			// Projects
-			r.Get("/projects", a.listProjects)
-			r.Post("/projects", a.createProject)
+				// Billing
+				r.Get("/billing/chargeback", a.chargeback)
+				r.Get("/billing/chargeback.csv", a.chargebackCSV)
+				r.Get("/billing/rates", a.listRates)
+				r.Post("/billing/rates", a.setRate)
+				r.Get("/billing/credits", a.creditSummary)
+				r.Get("/billing/ledger", a.creditLedger)
+				r.Post("/billing/credits/topup", a.topupCredits)
 
-			// Departments (org structure)
-			r.Get("/departments", a.listDepartments)
-			r.Post("/departments", a.createDepartment) // admin
+				// Projects
+				r.Get("/projects", a.listProjects)
+				r.Post("/projects", a.createProject)
 
-			// Users (admin only)
-			r.Get("/users", a.listUsers)
-			r.Post("/users", a.createUser)
-			r.Patch("/users/{id}/department", a.assignUserDepartment) // admin
+				// Departments (org structure)
+				r.Get("/departments", a.listDepartments)
+				r.Post("/departments", a.createDepartment) // admin
 
-			// Enrollment tokens (admin only)
-			r.Get("/enrollment-tokens", a.listTokens)
-			r.Post("/enrollment-tokens", a.issueToken)
-			r.Delete("/enrollment-tokens/{id}", a.revokeToken)
+				// Users (admin only)
+				r.Get("/users", a.listUsers)
+				r.Post("/users", a.createUser)
+				r.Patch("/users/{id}/department", a.assignUserDepartment) // admin
 
-			// Audit
-			r.Get("/audit-logs", a.auditLogs)
+				// Enrollment tokens (admin only)
+				r.Get("/enrollment-tokens", a.listTokens)
+				r.Post("/enrollment-tokens", a.issueToken)
+				r.Delete("/enrollment-tokens/{id}", a.revokeToken)
 
-			// Reservations (F4)
-			r.Get("/reservations", a.listReservations)
-			r.Post("/reservations", a.createReservation)
-			r.Delete("/reservations/{id}", a.cancelReservation)
+				// Audit
+				r.Get("/audit-logs", a.auditLogs)
 
-			// Budgets (F6)
-			r.Get("/budgets", a.listBudgets)
-			r.Post("/budgets", a.setBudget)             // admin
-			r.Delete("/budgets/{id}", a.deleteBudget)   // admin
+				// Reservations (F4)
+				r.Get("/reservations", a.listReservations)
+				r.Post("/reservations", a.createReservation)
+				r.Delete("/reservations/{id}", a.cancelReservation)
 
-			// Cost alerts (F5)
-			r.Get("/alerts", a.listAlerts)
-			r.Post("/alerts/{id}/ack", a.acknowledgeAlert)
-			r.Get("/alert-rules", a.listAlertRules)
-			r.Post("/alert-rules", a.createAlertRule)         // admin
-			r.Patch("/alert-rules/{id}", a.toggleAlertRule)   // admin
-			r.Delete("/alert-rules/{id}", a.deleteAlertRule)  // admin
-		})
+				// Budgets (F6)
+				r.Get("/budgets", a.listBudgets)
+				r.Post("/budgets", a.setBudget)           // admin
+				r.Delete("/budgets/{id}", a.deleteBudget) // admin
+
+				// Cost alerts (F5)
+				r.Get("/alerts", a.listAlerts)
+				r.Post("/alerts/{id}/ack", a.acknowledgeAlert)
+				r.Get("/alert-rules", a.listAlertRules)
+				r.Post("/alert-rules", a.createAlertRule)        // admin
+				r.Patch("/alert-rules/{id}", a.toggleAlertRule)  // admin
+				r.Delete("/alert-rules/{id}", a.deleteAlertRule) // admin
+			}) // end requireOrg subgroup
+		}) // end authenticated group
 	})
 	return r
 }
@@ -361,8 +397,8 @@ func (a *API) launchWorkload(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
 	var body struct {
 		Name           string  `json:"name"`
-		TemplateID     string  `json:"template_id"`  // template UUID (real registry)
-		Image          string  `json:"image"`        // optional ad-hoc image override
+		TemplateID     string  `json:"template_id"` // template UUID (real registry)
+		Image          string  `json:"image"`       // optional ad-hoc image override
 		GPUType        string  `json:"gpu_type"`
 		GPUCount       int     `json:"gpu_count"`
 		ProjectID      *string `json:"project_id"`
@@ -788,7 +824,9 @@ func (a *API) listProjects(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	var body struct{ Name string `json:"name"` }
+	var body struct {
+		Name string `json:"name"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		writeErr(w, 400, "validation", "name is required")
 		return
@@ -918,10 +956,10 @@ func (a *API) idleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type finding struct {
-		GPUID      string   `json:"gpu_id"`
-		IdleSec    int64    `json:"idle_seconds"`
-		IdleCost   float64  `json:"idle_cost"`
-		WorkloadID *string  `json:"workload_id,omitempty"`
+		GPUID      string  `json:"gpu_id"`
+		IdleSec    int64   `json:"idle_seconds"`
+		IdleCost   float64 `json:"idle_cost"`
+		WorkloadID *string `json:"workload_id,omitempty"`
 	}
 	out := make([]finding, 0, len(report.IdleGPUs))
 	for _, f := range report.IdleGPUs {
@@ -978,12 +1016,35 @@ func userFromCtx(r *http.Request) domain.User {
 
 // setUser is defined in context.go as withUser — alias here for readability.
 
-// CORS middleware allowing the Next.js dev server.
-func corsMiddleware(next http.Handler) http.Handler {
+// requireOrg blocks pre-onboarding users (no org yet) from the main application.
+// Per the onboarding contract they may only reach /me and the onboarding endpoints;
+// everything else returns 409 until they create or join an organization.
+func (a *API) requireOrg(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if !userFromCtx(r).Onboarded() {
+			writeErr(w, 409, "onboarding_required", "create or join an organization to continue")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// corsMiddleware reflects an allowed origin and enables credentialed (cookie) requests.
+// With an explicit allow-list (prod) it echoes the request Origin if permitted and sets
+// Allow-Credentials. With no list configured (local dev) it falls back to "*" WITHOUT
+// credentials (the two are mutually exclusive per the CORS spec).
+func (a *API) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		w.Header().Set("Vary", "Origin")
+		if len(a.corsOrigins) == 0 {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		} else if origin != "" && a.originAllowed(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(204)
 			return
@@ -992,15 +1053,30 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func (a *API) originAllowed(origin string) bool {
+	for _, o := range a.corsOrigins {
+		if o == origin {
+			return true
+		}
+	}
+	return false
+}
+
 // ── Response helpers ──────────────────────────────────────────────────────────
 
 func userResponse(u domain.User) map[string]any {
 	r := map[string]any{
-		"id":     u.ID.String(),
-		"org_id": u.OrgID.String(),
-		"email":  u.Email,
-		"name":   u.Name,
-		"role":   u.Role,
+		"id":            u.ID.String(),
+		"org_id":        nil, // null = pre-onboarding (set below when present)
+		"email":         u.Email,
+		"name":          u.Name,
+		"role":          u.Role,
+		"avatar_url":    u.AvatarURL,
+		"auth_provider": u.AuthProvider,
+		"onboarded":     u.Onboarded(),
+	}
+	if u.Onboarded() {
+		r["org_id"] = u.OrgID.String()
 	}
 	if u.DepartmentID != nil {
 		r["department_id"] = u.DepartmentID.String()
