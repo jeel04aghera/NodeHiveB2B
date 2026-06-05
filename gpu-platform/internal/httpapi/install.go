@@ -15,6 +15,23 @@ func agentDistDir() string {
 	return "./dist"
 }
 
+// agentDownloadBase is the base URL the installer downloads agent binaries from,
+// as "<base>/agent-<os>-<arch>". Defaults to the control plane's own /dist (fine for
+// dev/self-host/airgap), but in production set AGENT_DIST_BASE_URL to a CDN-backed,
+// versioned location so the ~11 MB binary doesn't stream from the single-region app
+// container. Examples (GitHub Releases — global CDN, free, versioned by tag):
+//
+//	AGENT_DIST_BASE_URL=https://github.com/<org>/<repo>/releases/download/v1.4.0   # pinned
+//	AGENT_DIST_BASE_URL=https://github.com/<org>/<repo>/releases/latest/download   # auto-latest
+//
+// The control plane keeps serving /dist either way, so it stays a working fallback.
+func agentDownloadBase(httpBase string) string {
+	if v := os.Getenv("AGENT_DIST_BASE_URL"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return httpBase + "/dist"
+}
+
 // publicGRPCAddr is the gRPC address baked into the install script. An explicit
 // AGENT_PUBLIC_GRPC_ADDR always wins (this is how you point agents at a publicly
 // routable gRPC endpoint — e.g. a Railway TCP-proxy host:port, since Railway's HTTP
@@ -63,7 +80,7 @@ echo "  on the control plane to that host:port (e.g. a Railway TCP Proxy endpoin
 	}
 
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
-	fmt.Fprintf(w, installTemplate, httpBase, grpc, warn)
+	fmt.Fprintf(w, installTemplate, httpBase, grpc, warn, agentDownloadBase(httpBase))
 }
 
 const installTemplate = `#!/bin/sh
@@ -73,6 +90,7 @@ set -e
 
 NH_HTTP="%[1]s"
 SERVER="%[2]s"
+DLBASE="%[4]s"
 TOKEN=""
 DEV=""
 
@@ -127,7 +145,7 @@ BIN="$DIR/nodehive-agent"
 mkdir -p "$DIR"
 
 ARTIFACT="agent-$OS-$ARCH"
-URL="$NH_HTTP/dist/$ARTIFACT"
+URL="$DLBASE/$ARTIFACT"
 echo "▸ Detected $PRETTY ($PLATFORM)."
 
 # Distinguish a genuinely missing artifact (404) from a flaky transfer by probing first.
@@ -139,10 +157,10 @@ if ! HEAD=$(curl -fL $CURLOPTS -I "$URL" </dev/null 2>/dev/null); then
   echo "error: no prebuilt agent available for $PRETTY." >&2
   echo "" >&2
   echo "  Expected artifact:" >&2
-  echo "    dist/$ARTIFACT" >&2
+  echo "    $URL" >&2
   echo "" >&2
   if [ -n "$AVAILABLE" ]; then
-    echo "  Available artifacts:" >&2
+    echo "  Available artifacts (bundled in the control plane):" >&2
     echo "$AVAILABLE" >&2
   else
     echo "  Available artifacts: none — the server is publishing no agent binaries." >&2

@@ -1,0 +1,43 @@
+name: Release agent binaries
+
+# Publishes the prebuilt agent binaries as GitHub Release assets, which are served
+# from GitHub's global CDN (free, versioned by tag). The control plane's install.sh
+# downloads from here when AGENT_DIST_BASE_URL points at the release, instead of
+# streaming the ~11 MB binary from the single-region app container.
+#
+# Cut a release:  git tag v1.4.0 && git push origin v1.4.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # required to create the release + upload assets
+
+jobs:
+  release:
+    name: Build + publish agent-<os>-<arch>
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.23" }
+
+      # Reuse the same target matrix the installer expects; verify-dist fails the
+      # release if any of the four artifacts is missing.
+      - run: make agent-dist
+      - run: bash scripts/verify-dist.sh --dir dist
+
+      - name: Checksums
+        run: cd dist && shasum -a 256 agent-* > checksums.txt && cat checksums.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/agent-darwin-arm64
+            dist/agent-darwin-amd64
+            dist/agent-linux-amd64
+            dist/agent-linux-arm64
+            dist/checksums.txt
+          fail_on_unmatched_files: true
+          generate_release_notes: true
