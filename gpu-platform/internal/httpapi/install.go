@@ -80,6 +80,16 @@ case "$ARCH" in
   arm64|aarch64) ARCH=arm64 ;;
 esac
 
+# Friendly name for the detected platform.
+PLATFORM="$OS/$ARCH"
+case "$OS/$ARCH" in
+  darwin/arm64) PRETTY="macOS Apple Silicon" ;;
+  darwin/amd64) PRETTY="macOS Intel" ;;
+  linux/amd64)  PRETTY="Linux x86_64" ;;
+  linux/arm64)  PRETTY="Linux ARM64" ;;
+  *)            PRETTY="$PLATFORM" ;;
+esac
+
 # No NVIDIA GPU (e.g. Apple Silicon)? Run in dev mode: synthetic GPU inventory,
 # real Docker containers for workloads.
 if [ -z "$DEV" ] && ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -91,9 +101,27 @@ DIR="$HOME/.nodehive"
 BIN="$DIR/nodehive-agent"
 mkdir -p "$DIR"
 
-echo "▸ Downloading NodeHive agent ($OS/$ARCH)…"
-if ! curl -fsSL "$NH_HTTP/dist/agent-$OS-$ARCH" -o "$BIN"; then
-  echo "error: no prebuilt agent for $OS/$ARCH at $NH_HTTP/dist/agent-$OS-$ARCH" >&2
+ARTIFACT="agent-$OS-$ARCH"
+echo "▸ Detected $PRETTY ($PLATFORM)."
+echo "▸ Downloading NodeHive agent ($ARTIFACT)…"
+if ! curl -fsSL "$NH_HTTP/dist/$ARTIFACT" -o "$BIN"; then
+  # List what the control plane actually publishes (parsed from the /dist listing).
+  AVAILABLE=$(curl -fsSL "$NH_HTTP/dist/" 2>/dev/null \
+    | grep -oE 'agent-[a-z0-9]+-[a-z0-9]+' | sort -u | sed 's/^/    /')
+  echo "" >&2
+  echo "error: no prebuilt agent available for $PRETTY." >&2
+  echo "" >&2
+  echo "  Expected artifact:" >&2
+  echo "    dist/$ARTIFACT" >&2
+  echo "" >&2
+  if [ -n "$AVAILABLE" ]; then
+    echo "  Available artifacts:" >&2
+    echo "$AVAILABLE" >&2
+  else
+    echo "  Available artifacts: none — the server is publishing no agent binaries." >&2
+    echo "  (control-plane image was built without 'make agent-dist' / the /dist copy step)" >&2
+  fi
+  echo "" >&2
   exit 1
 fi
 chmod +x "$BIN"

@@ -54,3 +54,30 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
+
+  agent-dist:
+    name: Agent artifacts (all 4 targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.23" }
+      # Cross-compile every target the installer can request, then fail if any is missing.
+      - run: make agent-dist
+      - run: bash scripts/verify-dist.sh --dir dist
+
+  deploy-image:
+    name: Control-plane image publishes /dist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Build the same image Railway deploys and assert the agent binaries are inside it,
+      # so a Dockerfile that forgets to copy ./dist can never reach production.
+      - run: docker build -t nodehive-cp:ci .
+      - name: Verify agent binaries are baked into the image
+        run: |
+          for t in darwin-arm64 darwin-amd64 linux-amd64 linux-arm64; do
+            docker run --rm --entrypoint /bin/sh nodehive-cp:ci -c "test -s /dist/agent-$t" \
+              && echo "  ✓ /dist/agent-$t" \
+              || { echo "  ✗ /dist/agent-$t missing in image" >&2; exit 1; }
+          done

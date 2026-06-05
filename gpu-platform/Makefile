@@ -104,6 +104,11 @@ agent-dist: ## Build prebuilt agent binaries the control plane serves at /dist (
 	CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build -o dist/agent-linux-amd64  ./cmd/agent
 	CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -o dist/agent-linux-arm64  ./cmd/agent
 	@echo "✓ Agent binaries in ./dist (served at /dist/agent-<os>-<arch>)"
+	@$(MAKE) verify-dist
+
+.PHONY: verify-dist
+verify-dist: ## Fail if any expected agent artifact is missing from ./dist
+	bash scripts/verify-dist.sh
 
 .PHONY: test
 test: ## Run unit tests
