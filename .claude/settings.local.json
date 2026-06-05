@@ -174,7 +174,10 @@
       "Bash(python3 -c 'import sys,json;d=json.load\\(sys.stdin\\);print\\(\"client:\",d.get\\(\"city\"\\),d.get\\(\"region\"\\),d.get\\(\"country\"\\),\"org:\",d.get\\(\"org\"\\)\\)')",
       "Bash(python3 -c 'import yaml,sys; d=yaml.safe_load\\(open\\(\".github/workflows/release.yml\"\\)\\); print\\(\"parsed OK; top-level keys:\", list\\(d.keys\\(\\)\\)\\); print\\(\"defaults:\", d.get\\(\"defaults\"\\)\\); print\\(\"on:\", d.get\\(True\\) or d.get\\(\"on\"\\)\\)')",
       "Bash(git checkout *)",
-      "Bash(ruby -ryaml -e 'd=YAML.load_file\\(\".github/workflows/release.yml\"\\); puts \"parsed OK\"; puts \"keys: #{d.keys.inspect}\"; puts \"defaults: #{d[\"defaults\"].inspect}\"')"
+      "Bash(ruby -ryaml -e 'd=YAML.load_file\\(\".github/workflows/release.yml\"\\); puts \"parsed OK\"; puts \"keys: #{d.keys.inspect}\"; puts \"defaults: #{d[\"defaults\"].inspect}\"')",
+      "Bash(git -C /Users/jeelaghera/Downloads/Koala remote get-url origin)",
+      "Bash(echo \"git remote: $\\(git -C /Users/jeelaghera/Downloads/Koala remote get-url origin\\)\")",
+      "WebFetch(domain:github.com)"
     ]
   }
 }

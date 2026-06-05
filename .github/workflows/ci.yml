@@ -4,6 +4,12 @@ on:
     branches: [main]
   pull_request:
 
+# The Go project + web app live under gpu-platform/, not at the repo root. Run all
+# shell steps there. (uses: actions ignore working-directory — they get path inputs.)
+defaults:
+  run:
+    working-directory: gpu-platform
+
 jobs:
   proto:
     name: Proto lint + breaking
@@ -13,9 +19,12 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: bufbuild/buf-action@v1
         with:
+          input: gpu-platform          # buf.yaml is in the subdir, not the repo root
           lint: true
           breaking: true
-          breaking_against: "https://github.com/nodehive/gpu-platform.git#branch=main"
+          # No breaking_against: use the action default (PR base / previous commit from
+          # the local checkout). The old github.com/nodehive/gpu-platform URL 404s, and
+          # the real repo is private (can't be cloned unauthenticated in CI).
 
   backend:
     name: Go lint + test + build
@@ -33,7 +42,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: "1.23" }
+        with:
+          go-version-file: gpu-platform/go.mod   # go.mod says 1.25.7; was pinned to 1.23
+          cache-dependency-path: gpu-platform/go.sum
       - run: make tools
       - run: make generate
       - run: go mod tidy && git diff --exit-code go.mod go.sum   # deps must be tidy
@@ -46,11 +57,11 @@ jobs:
   web:
     name: Frontend lint + build
     runs-on: ubuntu-latest
-    defaults: { run: { working-directory: web } }
+    defaults: { run: { working-directory: gpu-platform/web } }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: "20", cache: "npm", cache-dependency-path: web/package-lock.json }
+        with: { node-version: "20", cache: "npm", cache-dependency-path: gpu-platform/web/package-lock.json }
       - run: npm ci
       - run: npm run lint
       - run: npm run build
@@ -61,7 +72,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: "1.23" }
+        with:
+          go-version-file: gpu-platform/go.mod
+          cache-dependency-path: gpu-platform/go.sum
       # Cross-compile every target the installer can request, then fail if any is missing.
       - run: make agent-dist
       - run: bash scripts/verify-dist.sh --dir dist
@@ -71,8 +84,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Build the same image Railway deploys and assert the agent binaries are inside it,
-      # so a Dockerfile that forgets to copy ./dist can never reach production.
+      # Build the same image Railway deploys (context = gpu-platform via working-directory)
+      # and assert the agent binaries are inside it.
       - run: docker build -t nodehive-cp:ci .
       - name: Verify agent binaries are baked into the image
         run: |
