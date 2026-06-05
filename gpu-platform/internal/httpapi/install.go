@@ -15,11 +15,16 @@ func agentDistDir() string {
 	return "./dist"
 }
 
-// publicGRPCAddr is the gRPC address baked into the install script. Defaults to the
-// request host on the gRPC port (dev), overridable for real deployments.
-func publicGRPCAddr(host string) string {
+// publicGRPCAddr is the gRPC address baked into the install script. An explicit
+// AGENT_PUBLIC_GRPC_ADDR always wins (this is how you point agents at a publicly
+// routable gRPC endpoint — e.g. a Railway TCP-proxy host:port, since Railway's HTTP
+// edge can't carry gRPC and won't route a second port). With no override we derive
+// <request-host>:9090, which is only correct when that port is directly reachable
+// (local/dev, or a VM that exposes both ports). The bool reports that derived case so
+// the installer can warn when it's likely unreachable (a hosted HTTPS control plane).
+func publicGRPCAddr(host string) (addr string, derived bool) {
 	if v := os.Getenv("AGENT_PUBLIC_GRPC_ADDR"); v != "" {
-		return v
+		return v, false
 	}
 	h := host
 	if i := strings.IndexByte(h, ':'); i >= 0 {
@@ -28,7 +33,7 @@ func publicGRPCAddr(host string) string {
 	if h == "" {
 		h = "localhost"
 	}
-	return h + ":9090"
+	return h + ":9090", true
 }
 
 // installScript serves a self-contained one-line installer:
@@ -43,10 +48,22 @@ func (a *API) installScript(w http.ResponseWriter, r *http.Request) {
 		scheme = "https"
 	}
 	httpBase := scheme + "://" + r.Host
-	grpc := publicGRPCAddr(r.Host)
+	grpc, derived := publicGRPCAddr(r.Host)
+
+	// A hosted (HTTPS) control plane that derived <host>:9090 is almost certainly
+	// behind a proxy that doesn't route that port (Railway, most PaaS) — enrollment
+	// will i/o-timeout on gRPC. Surface the exact remedy instead of failing silently.
+	warn := ""
+	if derived && scheme == "https" {
+		warn = `echo "⚠ This control plane advertises gRPC at ` + grpc + `, derived from the HTTP host." >&2
+echo "  If enrollment times out, that port is not publicly routable. Expose the agent" >&2
+echo "  gateway (container port 9090) over a raw TCP route and set AGENT_PUBLIC_GRPC_ADDR" >&2
+echo "  on the control plane to that host:port (e.g. a Railway TCP Proxy endpoint)." >&2
+`
+	}
 
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
-	fmt.Fprintf(w, installTemplate, httpBase, grpc)
+	fmt.Fprintf(w, installTemplate, httpBase, grpc, warn)
 }
 
 const installTemplate = `#!/bin/sh
@@ -73,7 +90,7 @@ if [ -z "$TOKEN" ]; then
   exit 1
 fi
 
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+%[3]sOS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64|amd64) ARCH=amd64 ;;

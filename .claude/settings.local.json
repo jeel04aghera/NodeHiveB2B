@@ -143,7 +143,28 @@
       "Bash(python3 -c 'import sys,json;d=json.load\\(sys.stdin\\);print\\(\"gpu count:\",len\\(d\\)\\);[print\\(\" -\",g.get\\(\"model\"\\),g.get\\(\"status\"\\)\\) for g in d]')",
       "Bash(pkill -f \"nodehive-agent\")",
       "Bash(pkill -f \"next dev\")",
-      "Bash(pkill -f \"next-server\")"
+      "Bash(pkill -f \"next-server\")",
+      "Bash(sed -n '80,160p' agent/client/client.go)",
+      "Bash(sed -n '460,495p' agent/client/client.go)",
+      "WebSearch",
+      "Bash(lsof -nP -iTCP -sTCP:LISTEN)",
+      "Bash(nc -z -G2 127.0.0.1 9090)",
+      "Bash(nc -z -G2 127.0.0.1 8080)",
+      "WebFetch(domain:docs.railway.com)",
+      "WebFetch(domain:station.railway.com)",
+      "Bash(pkill -f \"/tmp/cp\")",
+      "Bash(/tmp/tcpproxy/proxy)",
+      "Bash(echo \"proxy PID $!\")",
+      "Bash(curl -fsSL \"http://localhost:8080/install.sh\")",
+      "Bash(nc -z -G2 127.0.0.1 19090)",
+      "Bash(python3 -c 'import sys,json;d=json.load\\(sys.stdin\\);[print\\(\"node:\",n[\"hostname\"],\"status:\",n[\"status\"],\"gpus:\",n[\"gpu_count\"]\\) for n in d]')",
+      "Bash(DATABASE_URL=postgres://gpu:gpu@localhost:5432/gpu?sslmode=disable GRPC_INSECURE=true AGENT_PUBLIC_GRPC_ADDR=shuttle.proxy.rlwy.net:15140 /tmp/cp)",
+      "Bash(curl -fsSL -H \"X-Forwarded-Proto: https\" \"http://localhost:8080/install.sh\")",
+      "Bash(sh -n /tmp/s1.sh)",
+      "Bash(sh -n /tmp/s3.sh)",
+      "Bash(DATABASE_URL=\"postgres://gpu:gpu@localhost:5432/gpu?sslmode=disable\" GRPC_INSECURE=true /tmp/cp)",
+      "Bash(sh -n /tmp/s2.sh)",
+      "Bash(pkill -f \"tcpproxy.py\")"
     ]
   }
 }
