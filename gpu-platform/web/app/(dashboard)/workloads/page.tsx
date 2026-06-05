@@ -126,7 +126,8 @@ const STATUS_TABS = [
 function WorkloadsContent() {
   const search = useSearchParams();
   const { data: workloads, isLoading, error, refetch } = useWorkloads();
-  const { data: templates } = useTemplates();
+  const templatesQuery = useTemplates();
+  const templates = templatesQuery.data;
   const { data: departments } = useDepartments();
   const { data: projects } = useProjects();
   const { data: rates } = useRates();
@@ -140,6 +141,28 @@ function WorkloadsContent() {
   const [deptFilter, setDeptFilter] = useState("all");
   const [ownerFilter, setOwnerFilter] = useState("all");
   const [templateFilter, setTemplateFilter] = useState("all");
+
+  // Surface a hint if the template fetch is unusually slow while the modal is open,
+  // so it never looks like an indefinite "Loading…".
+  const [templatesSlow, setTemplatesSlow] = useState(false);
+  useEffect(() => {
+    if (!showModal || !templatesQuery.isLoading) { setTemplatesSlow(false); return; }
+    const t = setTimeout(() => setTemplatesSlow(true), 8000);
+    return () => clearTimeout(t);
+  }, [showModal, templatesQuery.isLoading]);
+
+  // Dev-only visibility into the template query (status / count / error).
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "production") {
+      // eslint-disable-next-line no-console
+      console.debug("[templates]", {
+        status: templatesQuery.status,
+        fetchStatus: templatesQuery.fetchStatus,
+        count: templatesQuery.data?.length ?? 0,
+        error: templatesQuery.error,
+      });
+    }
+  }, [templatesQuery.status, templatesQuery.fetchStatus, templatesQuery.data, templatesQuery.error]);
 
   const selected = workloads?.find((w) => w.id === selectedId) ?? null;
   const enriched = useEnrichedWorkloads((workloads ?? []).map((w) => w.id));
@@ -322,10 +345,33 @@ function WorkloadsContent() {
             <FormField label="Workload name" required><Input type="text" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="my-experiment" required autoFocus /></FormField>
 
             <Step n={1} title="Template" desc="The environment your workload runs in.">
-              <Select value={form.template_id} onChange={(e) => pickTemplate(e.target.value)}>
-                {!templates?.length && <option value="">Loading…</option>}
-                {templates?.map((t) => <option key={t.id} value={t.id}>{t.name}{t.version ? ` (${t.version})` : ""}</option>)}
-              </Select>
+              {templatesQuery.isLoading ? (
+                <div className="flex items-center gap-2 rounded-md border border-line bg-subtle px-3 py-2 text-sm text-ink-muted">
+                  <RefreshCw size={14} className="animate-spin" />
+                  Loading templates…
+                  {templatesSlow && <span className="text-ink-subtle">this is taking longer than usual.</span>}
+                </div>
+              ) : templatesQuery.isError ? (
+                <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm">
+                  <div className="text-ink">Couldn’t load templates.</div>
+                  <div className="mt-0.5 text-xs text-ink-muted">{(templatesQuery.error as Error)?.message ?? "The request failed."}</div>
+                  <Button type="button" variant="secondary" size="sm" className="mt-2" onClick={() => templatesQuery.refetch()}>
+                    <RefreshCw size={14} /> Retry
+                  </Button>
+                </div>
+              ) : !templates?.length ? (
+                <div className="rounded-md border border-line bg-subtle px-3 py-2 text-sm">
+                  <div className="text-ink">No templates available.</div>
+                  <div className="mt-0.5 text-xs text-ink-muted">No environments are configured yet. Ask an admin to seed the built-in templates, or add one under Templates.</div>
+                  <Button type="button" variant="secondary" size="sm" className="mt-2" onClick={() => templatesQuery.refetch()}>
+                    <RefreshCw size={14} /> Retry
+                  </Button>
+                </div>
+              ) : (
+                <Select value={form.template_id} onChange={(e) => pickTemplate(e.target.value)}>
+                  {templates.map((t) => <option key={t.id} value={t.id}>{t.name}{t.version ? ` (${t.version})` : ""}</option>)}
+                </Select>
+              )}
               {selectedTemplate && (
                 <div className="mt-2 flex items-center gap-2 rounded-md border border-line bg-subtle px-3 py-2 text-xs">
                   <span className="text-ink-subtle">Image</span><code className="truncate font-mono text-ink">{selectedTemplate.base_image}</code>
