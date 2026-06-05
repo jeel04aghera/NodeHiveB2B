@@ -13,6 +13,12 @@ on:
 permissions:
   contents: write   # required to create the release + upload assets
 
+# The Go project is not at the repo root — it lives under gpu-platform/. Run every
+# shell step there so the Makefile, scripts/, go.mod and dist/ all resolve correctly.
+defaults:
+  run:
+    working-directory: gpu-platform
+
 jobs:
   release:
     name: Build + publish agent-<os>-<arch>
@@ -20,7 +26,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: "1.23" }
+        with:
+          go-version: "1.23"
+          cache-dependency-path: gpu-platform/go.sum   # go.sum isn't at the repo root
 
       # Reuse the same target matrix the installer expects; verify-dist fails the
       # release if any of the four artifacts is missing.
@@ -33,11 +41,13 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          # File inputs to an action resolve from the repo root, NOT the
+          # defaults.run.working-directory above (that only affects `run:` steps).
           files: |
-            dist/agent-darwin-arm64
-            dist/agent-darwin-amd64
-            dist/agent-linux-amd64
-            dist/agent-linux-arm64
-            dist/checksums.txt
+            gpu-platform/dist/agent-darwin-arm64
+            gpu-platform/dist/agent-darwin-amd64
+            gpu-platform/dist/agent-linux-amd64
+            gpu-platform/dist/agent-linux-arm64
+            gpu-platform/dist/checksums.txt
           fail_on_unmatched_files: true
           generate_release_notes: true

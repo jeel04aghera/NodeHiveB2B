@@ -168,7 +168,13 @@
       "Bash(pkill -f \"agent-darwin-arm64\")",
       "Bash(pkill -f \"seq 1 15\")",
       "Bash(xargs kill)",
-      "Bash(python3 -c 'import sys,json;[print\\(\"node:\",n[\"hostname\"],n[\"status\"],n[\"gpu_count\"],\"gpus\"\\) for n in json.load\\(sys.stdin\\)]')"
+      "Bash(python3 -c 'import sys,json;[print\\(\"node:\",n[\"hostname\"],n[\"status\"],n[\"gpu_count\"],\"gpus\"\\) for n in json.load\\(sys.stdin\\)]')",
+      "Bash(curl -fsS -D - -o /dev/null https://nodehiveb2b-production.up.railway.app/dist/agent-darwin-arm64)",
+      "Bash(curl -fsS https://ipinfo.io/json)",
+      "Bash(python3 -c 'import sys,json;d=json.load\\(sys.stdin\\);print\\(\"client:\",d.get\\(\"city\"\\),d.get\\(\"region\"\\),d.get\\(\"country\"\\),\"org:\",d.get\\(\"org\"\\)\\)')",
+      "Bash(python3 -c 'import yaml,sys; d=yaml.safe_load\\(open\\(\".github/workflows/release.yml\"\\)\\); print\\(\"parsed OK; top-level keys:\", list\\(d.keys\\(\\)\\)\\); print\\(\"defaults:\", d.get\\(\"defaults\"\\)\\); print\\(\"on:\", d.get\\(True\\) or d.get\\(\"on\"\\)\\)')",
+      "Bash(git checkout *)",
+      "Bash(ruby -ryaml -e 'd=YAML.load_file\\(\".github/workflows/release.yml\"\\); puts \"parsed OK\"; puts \"keys: #{d.keys.inspect}\"; puts \"defaults: #{d[\"defaults\"].inspect}\"')"
     ]
   }
 }
