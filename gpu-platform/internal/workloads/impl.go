@@ -214,7 +214,23 @@ const workloadCols = `id, org_id, project_id, department_id, template_id, user_i
 	        coalesce(ssh_endpoint,''), coalesce(jupyter_endpoint,''), coalesce(logs,''),
 	        started_at, stopped_at, coalesce(stop_reason,''), created_at, coalesce(stage,'')`
 
-func (s *ServiceImpl) Get(ctx context.Context, id uuid.UUID) (domain.Workload, error) {
+// Get returns a workload only if it belongs to orgID. A mismatch (or missing row)
+// returns ErrNotFound, so a caller in another org cannot read it (cross-tenant IDOR).
+func (s *ServiceImpl) Get(ctx context.Context, orgID, id uuid.UUID) (domain.Workload, error) {
+	w, err := s.getByID(ctx, id)
+	if err != nil {
+		return domain.Workload{}, err
+	}
+	if w.OrgID != orgID {
+		return domain.Workload{}, ErrNotFound
+	}
+	return w, nil
+}
+
+// getByID loads a workload by primary key with NO org scoping. Internal use only
+// (system-initiated paths: queue promotion, sweeps) — never reachable from a user
+// request. All request-facing reads MUST go through the org-scoped Get above.
+func (s *ServiceImpl) getByID(ctx context.Context, id uuid.UUID) (domain.Workload, error) {
 	var w domain.Workload
 	err := s.db.QueryRow(ctx,
 		`SELECT `+workloadCols+` FROM workloads WHERE id=$1`, id).
@@ -231,8 +247,9 @@ func (s *ServiceImpl) Get(ctx context.Context, id uuid.UUID) (domain.Workload, e
 }
 
 // Detail returns the workload plus its GPU allocation and a live runtime cost.
-func (s *ServiceImpl) Detail(ctx context.Context, id uuid.UUID) (DetailView, error) {
-	wl, err := s.Get(ctx, id)
+// Scoped to orgID — a cross-org id returns ErrNotFound.
+func (s *ServiceImpl) Detail(ctx context.Context, orgID, id uuid.UUID) (DetailView, error) {
+	wl, err := s.Get(ctx, orgID, id)
 	if err != nil {
 		return DetailView{}, err
 	}

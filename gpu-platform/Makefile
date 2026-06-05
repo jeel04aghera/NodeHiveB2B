@@ -80,7 +80,7 @@ dev: ## Start Postgres, migrate, seed; then print run instructions
 
 .PHONY: backend
 backend: ## Run the control plane (hot reload if air is installed)
-	air -c .air.controlplane.toml 2>/dev/null || go run ./cmd/controlplane
+	ENV=development air -c .air.controlplane.toml 2>/dev/null || ENV=development go run ./cmd/controlplane
 
 .PHONY: agent
 agent: ## Run an agent against localhost (enrolls with the dev token)

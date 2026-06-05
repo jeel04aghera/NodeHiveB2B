@@ -463,7 +463,7 @@ func (a *API) getWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := userFromCtx(r)
-	d, err := a.workloads.Detail(r.Context(), id)
+	d, err := a.workloads.Detail(r.Context(), u.OrgID, id)
 	if errors.Is(err, workloads.ErrNotFound) {
 		writeErr(w, 404, "not_found", "workload not found")
 		return
@@ -534,8 +534,19 @@ func (a *API) stopWorkload(w http.ResponseWriter, r *http.Request) {
 			reason = domain.StopAdmin
 		}
 	}
+	// Org-scoped ownership gate: a workload outside the caller's org is invisible
+	// (404) and cannot be cancelled or stopped (cross-tenant write prevention).
+	wl, err := a.workloads.Get(r.Context(), u.OrgID, id)
+	if errors.Is(err, workloads.ErrNotFound) {
+		writeErr(w, 404, "not_found", "workload not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, "internal", "could not load workload")
+		return
+	}
 	// A queued workload has no container yet — cancel it out of the queue (F3).
-	if wl, gerr := a.workloads.Get(r.Context(), id); gerr == nil && wl.Status == domain.WorkloadQueued {
+	if wl.Status == domain.WorkloadQueued {
 		if err := a.workloads.CancelQueued(r.Context(), id); err != nil {
 			writeErr(w, 500, "internal", "could not cancel queued workload")
 			return
@@ -562,7 +573,8 @@ func (a *API) workloadLogs(w http.ResponseWriter, r *http.Request) {
 	if id == uuid.Nil {
 		return
 	}
-	wl, err := a.workloads.Get(r.Context(), id)
+	u := userFromCtx(r)
+	wl, err := a.workloads.Get(r.Context(), u.OrgID, id)
 	if err != nil {
 		writeErr(w, 404, "not_found", "workload not found")
 		return
@@ -575,7 +587,12 @@ func (a *API) workloadEvents(w http.ResponseWriter, r *http.Request) {
 	if id == uuid.Nil {
 		return
 	}
-	events, err := a.workloads.ListEvents(r.Context(), id)
+	u := userFromCtx(r)
+	events, err := a.workloads.ListEvents(r.Context(), u.OrgID, id)
+	if errors.Is(err, workloads.ErrNotFound) {
+		writeErr(w, 404, "not_found", "workload not found")
+		return
+	}
 	if err != nil {
 		writeErr(w, 500, "internal", "could not query events")
 		return

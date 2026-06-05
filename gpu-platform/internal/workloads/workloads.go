@@ -49,8 +49,10 @@ type DetailView struct {
 type Service interface {
 	Launch(ctx context.Context, orgID uuid.UUID, req LaunchRequest) (domain.Workload, error)
 	Stop(ctx context.Context, id uuid.UUID, reason domain.StopReason) error
-	Get(ctx context.Context, id uuid.UUID) (domain.Workload, error)
-	Detail(ctx context.Context, id uuid.UUID) (DetailView, error)
+	// Get and Detail are org-scoped: a workload outside orgID returns ErrNotFound,
+	// so one org cannot read another org's workload (incl. its SSH credential).
+	Get(ctx context.Context, orgID, id uuid.UUID) (domain.Workload, error)
+	Detail(ctx context.Context, orgID, id uuid.UUID) (DetailView, error)
 	List(ctx context.Context, orgID uuid.UUID, f ListFilter) ([]domain.Workload, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, state domain.WorkloadState, ssh, jupyter, msg, logs string) error
 	// SweepStuck reclaims GPUs from workloads whose node is offline (marks them failed)
@@ -60,7 +62,7 @@ type Service interface {
 	// F1 — lifecycle events / timeline.
 	RecordEvent(ctx context.Context, workloadID, orgID uuid.UUID, stage, message string) error
 	RecordStageEvent(ctx context.Context, workloadID uuid.UUID, stage string) error
-	ListEvents(ctx context.Context, workloadID uuid.UUID) ([]WorkloadEvent, error)
+	ListEvents(ctx context.Context, orgID, workloadID uuid.UUID) ([]WorkloadEvent, error)
 
 	// F3 — queue.
 	ListQueue(ctx context.Context, orgID uuid.UUID) (QueueStats, error)

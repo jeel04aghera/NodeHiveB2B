@@ -58,8 +58,12 @@ func (s *ServiceImpl) RecordStageEvent(ctx context.Context, workloadID uuid.UUID
 	return s.recordEvent(ctx, workloadID, orgID, stage, "")
 }
 
-// ListEvents returns the lifecycle timeline for a workload, oldest first.
-func (s *ServiceImpl) ListEvents(ctx context.Context, workloadID uuid.UUID) ([]WorkloadEvent, error) {
+// ListEvents returns the lifecycle timeline for a workload, oldest first. Scoped to
+// orgID — a workload in another org returns ErrNotFound (no cross-tenant timeline read).
+func (s *ServiceImpl) ListEvents(ctx context.Context, orgID, workloadID uuid.UUID) ([]WorkloadEvent, error) {
+	if _, err := s.Get(ctx, orgID, workloadID); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(ctx,
 		`SELECT id, stage, message, ts FROM workload_events WHERE workload_id=$1 ORDER BY ts, id`, workloadID)
 	if err != nil {

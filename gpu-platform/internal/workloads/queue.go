@@ -150,7 +150,7 @@ func (s *ServiceImpl) tryPromoteQueue(ctx context.Context, orgID uuid.UUID) {
 	}
 	_ = s.recordEvent(ctx, id, orgID, "node_selected", "promoted from queue")
 
-	wl, err := s.Get(ctx, id)
+	wl, err := s.getByID(ctx, id) // system path: this workload's org was just resolved above
 	if err != nil {
 		return
 	}

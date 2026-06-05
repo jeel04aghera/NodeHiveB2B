@@ -26,17 +26,21 @@ type AuthConfig struct {
 }
 
 type Config struct {
+	Env                string // "development" or "production" (default). Gates dev bootstrap + secret checks.
 	DB                 DBConfig
 	HTTP               HTTPConfig
 	GRPC               GRPCConfig
 	Auth               AuthConfig
 	DevOrgSlug         string // org that dev nodes enroll into (matches scripts/seed_dev.sql)
-	DevEnrollmentToken string // if set, control plane seeds this token on startup
-	DevBootstrapAdmin  string // email:password to seed on first run
+	DevEnrollmentToken string // if set AND dev mode, control plane seeds this token on startup
+	DevBootstrapAdmin  string // email:password to seed on first run (dev mode only)
 }
 
 func Load() (Config, error) {
 	c := Config{
+		// Default to production so a deploy that forgets to set ENV fails CLOSED:
+		// no dev credentials are seeded and a weak/placeholder JWT_SECRET is rejected.
+		Env:  strings.ToLower(env("ENV", "production")),
 		DB:   DBConfig{URL: env("DATABASE_URL", "postgres://gpu:gpu@localhost:5432/gpu?sslmode=disable")},
 		HTTP: HTTPConfig{Addr: env("HTTP_ADDR", ":8080")},
 		GRPC: GRPCConfig{
@@ -53,6 +57,23 @@ func Load() (Config, error) {
 	return c, c.Validate()
 }
 
+// IsDev reports whether the control plane runs in development mode. ONLY in dev are
+// the DEV_* bootstrap admin/token seeded and the JWT secret allowed to be weak.
+func (c Config) IsDev() bool {
+	return c.Env == "development" || c.Env == "dev"
+}
+
+// weakJWTSecrets are placeholder values that must never protect a real deployment.
+var weakJWTSecrets = map[string]bool{
+	"":                        true,
+	"dev-only-change-me":      true,
+	"change-me-in-production": true,
+	"change-me":               true,
+	"changeme":                true,
+	"secret":                  true,
+	"password":                true,
+}
+
 func (c Config) Validate() error {
 	if c.DB.URL == "" {
 		return fmt.Errorf("config: DATABASE_URL is required")
@@ -60,8 +81,16 @@ func (c Config) Validate() error {
 	if c.HTTP.Addr == "" || c.GRPC.Addr == "" {
 		return fmt.Errorf("config: HTTP_ADDR and GRPC_ADDR are required")
 	}
-	if !c.GRPC.Insecure && c.Auth.JWTSecret == "dev-only-change-me" {
-		return fmt.Errorf("config: set a real JWT_SECRET outside insecure dev mode")
+	// Production must run with a strong, explicitly-set JWT secret. Empty or any known
+	// placeholder is rejected at startup (fail closed) so tokens can't be forged with a
+	// public secret. Independent of GRPC_INSECURE (Railway runs insecure gRPC).
+	if !c.IsDev() {
+		if weakJWTSecrets[c.Auth.JWTSecret] {
+			return fmt.Errorf("config: JWT_SECRET is missing or a known placeholder; set a strong secret (ENV=development to bypass for local dev)")
+		}
+		if len(c.Auth.JWTSecret) < 16 {
+			return fmt.Errorf("config: JWT_SECRET must be at least 16 characters in production")
+		}
 	}
 	return nil
 }

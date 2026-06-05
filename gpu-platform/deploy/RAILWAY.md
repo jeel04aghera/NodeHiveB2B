@@ -45,10 +45,16 @@ derives `<host>:9090` but prints a warning explaining this exact problem and the
 
 ```
 DATABASE_URL=...           # Railway Postgres plugin
-JWT_SECRET=<random>
+JWT_SECRET=<32+ random chars>   # REQUIRED. Startup FAILS if missing/placeholder/<16 chars.
 GRPC_INSECURE=true         # plaintext gRPC over the TCP proxy (see note)
-# DEV_* bootstrap vars optional; unset DEV_ENROLLMENT_TOKEN/DEV_BOOTSTRAP_ADMIN in prod
+# Do NOT set ENV=development in prod. ENV defaults to "production", which disables the
+# DEV_* bootstrap admin/token entirely (they are ignored even if set) and enforces a
+# strong JWT_SECRET. Create real orgs via POST /auth/register.
 ```
+
+> **Generate the secret:** `openssl rand -hex 32`. If `JWT_SECRET` is unset or a known
+> placeholder (`change-me-in-production`, etc.), the control plane refuses to start —
+> this is intentional (fail closed) so tokens can never be signed with a public secret.
 
 > **Security note:** with `GRPC_INSECURE=true` the agent↔control-plane stream is plaintext
 > across the public internet (the TCP proxy does not add TLS). For production, terminate

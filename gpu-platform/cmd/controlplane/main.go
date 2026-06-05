@@ -82,19 +82,27 @@ func main() {
 	opsSvc := ops.New(pool)
 
 	// ── Bootstrap ─────────────────────────────────────────────────────────────
-	if cfg.DevEnrollmentToken != "" {
-		if err := nodeSvc.EnsureDevToken(ctx, cfg.DevOrgSlug, cfg.DevEnrollmentToken); err != nil {
-			log.Warn("could not seed dev enrollment token", "err", err)
-		} else {
-			log.Info("dev enrollment token ready", "token", cfg.DevEnrollmentToken, "org", cfg.DevOrgSlug)
+	// DEV_* bootstrap (known admin creds + a fixed enrollment token) runs ONLY in
+	// development. In production these are never created regardless of env values, so
+	// a deploy can't ship a predictable admin/token backdoor. Real orgs come from
+	// POST /auth/register.
+	if cfg.IsDev() {
+		if cfg.DevEnrollmentToken != "" {
+			if err := nodeSvc.EnsureDevToken(ctx, cfg.DevOrgSlug, cfg.DevEnrollmentToken); err != nil {
+				log.Warn("could not seed dev enrollment token", "err", err)
+			} else {
+				log.Info("dev enrollment token ready", "token", cfg.DevEnrollmentToken, "org", cfg.DevOrgSlug)
+			}
 		}
-	}
-	if cfg.DevBootstrapAdmin != "" {
-		if err := identitySvc.BootstrapAdmin(ctx, cfg.DevBootstrapAdmin); err != nil {
-			log.Warn("bootstrap admin failed", "err", err)
-		} else {
-			log.Info("admin user ready", "spec", cfg.DevBootstrapAdmin)
+		if cfg.DevBootstrapAdmin != "" {
+			if err := identitySvc.BootstrapAdmin(ctx, cfg.DevBootstrapAdmin); err != nil {
+				log.Warn("bootstrap admin failed", "err", err)
+			} else {
+				log.Info("admin user ready", "spec", cfg.DevBootstrapAdmin)
+			}
 		}
+	} else {
+		log.Info("production mode: dev bootstrap admin/token disabled")
 	}
 
 	// ── Background jobs ───────────────────────────────────────────────────────
