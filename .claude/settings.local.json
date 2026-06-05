@@ -164,7 +164,11 @@
       "Bash(sh -n /tmp/s3.sh)",
       "Bash(DATABASE_URL=\"postgres://gpu:gpu@localhost:5432/gpu?sslmode=disable\" GRPC_INSECURE=true /tmp/cp)",
       "Bash(sh -n /tmp/s2.sh)",
-      "Bash(pkill -f \"tcpproxy.py\")"
+      "Bash(pkill -f \"tcpproxy.py\")",
+      "Bash(pkill -f \"agent-darwin-arm64\")",
+      "Bash(pkill -f \"seq 1 15\")",
+      "Bash(xargs kill)",
+      "Bash(python3 -c 'import sys,json;[print\\(\"node:\",n[\"hostname\"],n[\"status\"],n[\"gpu_count\"],\"gpus\"\\) for n in json.load\\(sys.stdin\\)]')"
     ]
   }
 }

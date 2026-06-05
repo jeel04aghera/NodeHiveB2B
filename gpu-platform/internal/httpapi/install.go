@@ -90,6 +90,14 @@ if [ -z "$TOKEN" ]; then
   exit 1
 fi
 
+# Verbose tracing for support:  NH_DEBUG=1 curl -fsSL <cp>/install.sh | sh -s -- --token …
+# Normal runs stay quiet but still show errors (-sS); debug adds full curl traces + set -x.
+CURLOPTS="-sS"
+if [ "${NH_DEBUG:-}" = "1" ] || [ "${NH_DEBUG:-}" = "true" ]; then
+  set -x
+  CURLOPTS="-v"
+fi
+
 %[3]sOS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -119,11 +127,13 @@ BIN="$DIR/nodehive-agent"
 mkdir -p "$DIR"
 
 ARTIFACT="agent-$OS-$ARCH"
+URL="$NH_HTTP/dist/$ARTIFACT"
 echo "▸ Detected $PRETTY ($PLATFORM)."
-echo "▸ Downloading NodeHive agent ($ARTIFACT)…"
-if ! curl -fsSL "$NH_HTTP/dist/$ARTIFACT" -o "$BIN"; then
-  # List what the control plane actually publishes (parsed from the /dist listing).
-  AVAILABLE=$(curl -fsSL "$NH_HTTP/dist/" 2>/dev/null \
+
+# Distinguish a genuinely missing artifact (404) from a flaky transfer by probing first.
+# The HEAD also tells us the expected size so we can verify the download is complete.
+if ! HEAD=$(curl -fL $CURLOPTS -I "$URL" </dev/null 2>/dev/null); then
+  AVAILABLE=$(curl -fL $CURLOPTS "$NH_HTTP/dist/" </dev/null 2>/dev/null \
     | grep -oE 'agent-[a-z0-9]+-[a-z0-9]+' | sort -u | sed 's/^/    /')
   echo "" >&2
   echo "error: no prebuilt agent available for $PRETTY." >&2
@@ -141,9 +151,44 @@ if ! curl -fsSL "$NH_HTTP/dist/$ARTIFACT" -o "$BIN"; then
   echo "" >&2
   exit 1
 fi
-chmod +x "$BIN"
+EXPECT=$(printf '%%s' "$HEAD" | awk 'tolower($1) == "content-length:" { print $2 }' | tr -d '\r ' | tail -1)
 
-echo "▸ Enrolling with $SERVER and starting the agent…"
+# Railway's HTTP edge can STALL or RESET a large transfer mid-stream (the agent is
+# ~11 MB), surfacing as a hang or "curl: (56) Recv failure: Connection reset by peer".
+# Retry with resume (-C -) and a stall timeout (--speed-time) so a flaky network
+# recovers instead of writing a truncated binary or aborting the install.
+echo "▸ Downloading NodeHive agent ($ARTIFACT${EXPECT:+, $EXPECT bytes})…"
+TMP="$BIN.partial"
+rm -f "$TMP"
+if ! curl -fL $CURLOPTS --retry 5 --retry-delay 2 --retry-all-errors --retry-connrefused \
+        --connect-timeout 20 --speed-limit 2048 --speed-time 20 \
+        -C - "$URL" -o "$TMP" </dev/null; then
+  rc=$?
+  rm -f "$TMP"
+  echo "error: failed to download the agent after retries (curl exit $rc)." >&2
+  echo "  URL: $URL" >&2
+  echo "  Usually a transient network/edge reset mid-download — re-run the installer." >&2
+  echo "  For details: NH_DEBUG=1 curl -fsSL $NH_HTTP/install.sh | sh -s -- --token <TOKEN>" >&2
+  exit 1
+fi
+
+# Integrity gate: never chmod+exec an empty or truncated binary.
+GOT=$(wc -c < "$TMP" | tr -d ' ')
+if [ -z "$GOT" ] || [ "$GOT" -eq 0 ]; then
+  echo "error: downloaded agent is empty; re-run the installer." >&2
+  rm -f "$TMP"; exit 1
+fi
+if [ -n "$EXPECT" ] && [ "$GOT" != "$EXPECT" ]; then
+  echo "error: agent download incomplete — got $GOT of $EXPECT bytes; re-run the installer." >&2
+  rm -f "$TMP"; exit 1
+fi
+
+chmod +x "$TMP"
+mv -f "$TMP" "$BIN"
+echo "▸ Downloaded $GOT bytes → $BIN"
+
+echo "▸ Enrolling with the control plane (gRPC $SERVER) and starting the agent…"
+echo "  command: $BIN --server $SERVER --insecure --token <redacted> $DEV"
 echo "  (leave this running; the node stays online while the agent runs)"
 exec "$BIN" --server "$SERVER" --insecure --token "$TOKEN" $DEV
 `
