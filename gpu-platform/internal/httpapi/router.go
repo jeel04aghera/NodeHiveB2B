@@ -42,6 +42,9 @@ type API struct {
 	appBaseURL    string   // frontend origin the OAuth callback redirects back to
 	corsOrigins   []string // explicit allow-list; empty => permissive "*" (dev, no creds)
 	secureCookies bool     // Secure + SameSite=None (cross-origin prod); false => Lax (local)
+
+	// Sessions (Phase 2). refreshCookieTTL is the refresh-cookie Max-Age (0 => 30d default).
+	refreshCookieTTL time.Duration
 }
 
 // Option configures optional API features without breaking existing NewRouter callers.
@@ -58,6 +61,10 @@ func WithCORSOrigins(o []string) Option { return func(a *API) { a.corsOrigins = 
 
 // WithSecureCookies emits Secure + SameSite=None cookies (cross-origin production).
 func WithSecureCookies(b bool) Option { return func(a *API) { a.secureCookies = b } }
+
+// WithRefreshCookieTTL sets the refresh-token cookie lifetime (default 30 days). Should
+// match the service's REFRESH_TOKEN_TTL so the cookie and the server session expire together.
+func WithRefreshCookieTTL(d time.Duration) Option { return func(a *API) { a.refreshCookieTTL = d } }
 
 func NewRouter(
 	nodesSvc *nodes.Service,
@@ -102,6 +109,10 @@ func NewRouter(
 		// Auth (public)
 		r.Post("/auth/login", a.login)
 		r.Post("/auth/register", a.register)
+		// Refresh + logout are public: gated by the HttpOnly refresh cookie, not a Bearer
+		// token (the access token may already be expired when these are called).
+		r.Post("/auth/refresh", a.refresh)
+		r.Post("/auth/logout", a.logout)
 
 		// Google OAuth (public). Handlers no-op with 404 when OAuth isn't configured.
 		r.Get("/auth/google/start", a.googleStart)
@@ -114,6 +125,12 @@ func NewRouter(
 			// Pre-onboarding users (no org yet) may ONLY reach these:
 			r.Get("/me", a.me)
 			r.Post("/onboarding/organization", a.onboardingCreateOrg)
+
+			// Active session management (available to every authenticated user, incl.
+			// pre-onboarding — they still have devices/sessions to manage).
+			r.Get("/auth/sessions", a.listSessions)
+			r.Delete("/auth/sessions/{id}", a.revokeSession)
+			r.Post("/auth/sessions/revoke-all", a.revokeAllSessions)
 
 			// Everything below requires the user to belong to an org (post-onboarding).
 			r.Group(func(r chi.Router) {
@@ -220,6 +237,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "login failed")
 		return
 	}
+	a.startSession(w, r, user.ID) // additive: also sets the refresh cookie
 	writeJSON(w, 200, map[string]any{
 		"token": token,
 		"user":  userResponse(user),
@@ -246,6 +264,7 @@ func (a *API) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "validation", err.Error())
 		return
 	}
+	a.startSession(w, r, user.ID) // additive: also sets the refresh cookie
 	writeJSON(w, 201, map[string]any{
 		"token": token,
 		"user":  userResponse(user),
@@ -1030,22 +1049,35 @@ func (a *API) requireOrg(next http.Handler) http.Handler {
 }
 
 // corsMiddleware reflects an allowed origin and enables credentialed (cookie) requests.
-// With an explicit allow-list (prod) it echoes the request Origin if permitted and sets
-// Allow-Credentials. With no list configured (local dev) it falls back to "*" WITHOUT
-// credentials (the two are mutually exclusive per the CORS spec).
+// Behavior by configuration:
+//   - explicit allow-list (production): echo the request Origin if permitted + Allow-Credentials.
+//   - no allow-list, dev (insecure cookies): reflect the request Origin + Allow-Credentials so
+//     a cross-origin localhost frontend can use the refresh-cookie flow without extra config.
+//   - no allow-list, production (misconfigured): fall back to "*" WITHOUT credentials — never
+//     reflect an arbitrary origin with credentials in prod (that would defeat CORS).
+// "*" and credentials are mutually exclusive per the CORS spec, so they are never combined.
 func (a *API) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		w.Header().Set("Vary", "Origin")
-		if len(a.corsOrigins) == 0 {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-		} else if origin != "" && a.originAllowed(origin) {
+		switch {
+		case len(a.corsOrigins) > 0:
+			if origin != "" && a.originAllowed(origin) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+			}
+		case !a.secureCookies && origin != "":
+			// Dev convenience only (Secure cookies disabled => local dev): allow any origin
+			// WITH credentials so cookie auth works from localhost:3000 → localhost:8080.
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		default:
+			w.Header().Set("Access-Control-Allow-Origin", "*")
 		}
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Max-Age", "600") // cache preflight 10m
 			w.WriteHeader(204)
 			return
 		}

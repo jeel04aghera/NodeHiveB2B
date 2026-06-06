@@ -37,6 +37,8 @@ services:
       GRPC_ADDR: ":9090"
       GRPC_INSECURE: "true"
       JWT_SECRET: "local-dev-only-secret-not-for-prod"
+      ACCESS_TOKEN_TTL: "15m"   # Phase 2: short-lived access token
+      REFRESH_TOKEN_TTL: "720h" # Phase 2: 30-day refresh session
       DEV_ORG_SLUG: "dev"
       DEV_ENROLLMENT_TOKEN: "dev-enroll-token"
       DEV_BOOTSTRAP_ADMIN: "admin@dev.local:admin123"

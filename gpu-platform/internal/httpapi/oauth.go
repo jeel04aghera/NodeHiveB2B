@@ -48,12 +48,15 @@ func (a *API) googleCallback(w http.ResponseWriter, r *http.Request) {
 		a.oauthFail(w, r, "exchange_failed")
 		return
 	}
-	token, _, err := a.identity.UpsertGoogleUser(r.Context(),
+	token, user, err := a.identity.UpsertGoogleUser(r.Context(),
 		profile.Sub, profile.Email, profile.Name, profile.Picture, profile.EmailVerified)
 	if err != nil {
 		a.oauthFail(w, r, "account_error")
 		return
 	}
+	// Open a refresh session for this device too (same as password login) so Google
+	// users get rotation / device management. The refresh cookie rides the redirect.
+	a.startSession(w, r, user.ID)
 	// Deliver the token to the SPA. Cross-origin: hand it back in the URL fragment
 	// (never sent to servers/logs); the SPA reads it and decides onboarding vs dashboard.
 	if a.appBaseURL != "" {

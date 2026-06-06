@@ -50,6 +50,16 @@ GRPC_INSECURE=true         # plaintext gRPC over the TCP proxy (see note)
 # Do NOT set ENV=development in prod. ENV defaults to "production", which disables the
 # DEV_* bootstrap admin/token entirely (they are ignored even if set) and enforces a
 # strong JWT_SECRET. Create real orgs via POST /auth/register.
+
+# --- Sessions (Phase 2) ---
+ACCESS_TOKEN_TTL=15m       # short-lived Bearer access token. Unset => falls back to SESSION_TTL.
+REFRESH_TOKEN_TTL=720h     # refresh-token session lifetime (720h = 30 days).
+# Cross-origin cookie auth: the frontend and API are separate Railway origins, so the
+# refresh cookie is cross-site. REQUIRED in production:
+CORS_ALLOWED_ORIGINS=https://<web-host>   # explicit allow-list, NO wildcard; enables credentials.
+APP_BASE_URL=https://<web-host>           # also used by the Google OAuth callback redirect.
+# In production (ENV unset/production) cookies are emitted Secure + SameSite=None, which the
+# browser only accepts over HTTPS — Railway serves HTTPS, so this works out of the box.
 ```
 
 > **Generate the secret:** `openssl rand -hex 32`. If `JWT_SECRET` is unset or a known

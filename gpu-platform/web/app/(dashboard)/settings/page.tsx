@@ -13,8 +13,10 @@ import {
   PageHeader, Card, CardHeader, Table, Row, Cell, Badge, Button,
   Input, Select, FormField, CopyButton, Tabs, toneFor, TOKEN_TONE,
 } from "@/components/ui";
+import { SecuritySessions } from "@/components/SecuritySessions";
 
-const TABS = [
+// Admin tabs gate behind the admin role; Security (own sessions) is available to everyone.
+const ADMIN_TABS = [
   { key: "general", label: "General" },
   { key: "users", label: "Users" },
   { key: "departments", label: "Departments" },
@@ -22,13 +24,16 @@ const TABS = [
   { key: "templates", label: "Templates" },
   { key: "enrollment", label: "Node Enrollment" },
 ];
+const SECURITY_TAB = { key: "security", label: "Security" };
 
 function SettingsContent() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const router = useRouter();
   const search = useSearchParams();
-  const tab = TABS.some((t) => t.key === search.get("tab")) ? (search.get("tab") as string) : "general";
+  const TABS = isAdmin ? [...ADMIN_TABS, SECURITY_TAB] : [SECURITY_TAB];
+  const defaultTab = isAdmin ? "general" : "security";
+  const tab = TABS.some((t) => t.key === search.get("tab")) ? (search.get("tab") as string) : defaultTab;
   const setTab = (k: string) => router.push(k === "general" ? "/settings" : `/settings?tab=${k}`);
 
   const { data: rates, isLoading: ratesLoading } = useRates();
@@ -71,11 +76,13 @@ function SettingsContent() {
   async function handleCreateDept(e: React.FormEvent) { e.preventDefault(); if (!deptForm.name) return; await createDept.mutateAsync(deptForm); setDeptForm({ name: "", description: "" }); }
   async function handleIssueToken() { const res = await issueToken.mutateAsync(tokenForm); setToken(res.token); }
 
+  // Non-admins still manage their own active sessions under Security.
   if (!isAdmin) {
     return (
       <div className="space-y-6">
-        <PageHeader title="Settings" />
-        <Card className="p-10 text-center text-sm text-ink-muted">Only administrators can access settings.</Card>
+        <PageHeader title="Settings" description="Manage your account security." />
+        <Tabs items={TABS} value={tab} onChange={setTab} />
+        <SecuritySessions />
       </div>
     );
   }
@@ -84,6 +91,8 @@ function SettingsContent() {
     <div className="space-y-6">
       <PageHeader title="Settings" description="Organization configuration and administration." />
       <Tabs items={TABS} value={tab} onChange={setTab} />
+
+      {tab === "security" && <SecuritySessions />}
 
       {tab === "general" && (
         <div className="grid gap-4 lg:grid-cols-2">

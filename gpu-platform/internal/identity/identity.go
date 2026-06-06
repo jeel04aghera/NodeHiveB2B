@@ -36,6 +36,59 @@ type Service interface {
 
 	// BootstrapAdmin creates an admin from "email:password" if the org has no users.
 	BootstrapAdmin(ctx context.Context, spec string) error
+
+	// ── Session management (Phase 2) ──────────────────────────────────────────
+	// IssueAccessToken mints a short-lived Bearer access token for a user (no session
+	// row). Used when rotating a refresh token to hand back a fresh access token.
+	IssueAccessToken(ctx context.Context, u domain.User) (string, error)
+	// CreateSession opens a refresh-token session for a user and returns the RAW
+	// refresh token (caller puts it in an HttpOnly cookie; only its hash is stored).
+	CreateSession(ctx context.Context, userID uuid.UUID, dev DeviceInfo) (rawRefresh string, sess domain.Session, err error)
+	// RefreshSession validates a raw refresh token, rotates it (old token invalidated),
+	// and returns a fresh access token plus the new raw refresh token for the same session.
+	RefreshSession(ctx context.Context, rawRefresh string, dev DeviceInfo) (access, newRawRefresh string, user domain.User, sess domain.Session, err error)
+	// ListSessions returns a user's active (non-revoked, unexpired) sessions.
+	ListSessions(ctx context.Context, userID uuid.UUID) ([]domain.Session, error)
+	// RevokeSession revokes one session, scoped to its owner (cannot touch others').
+	RevokeSession(ctx context.Context, userID, sessionID uuid.UUID) error
+	// RevokeAllSessions revokes every active session for a user, optionally keeping one
+	// (the caller's current session) so "log out everywhere else" leaves them signed in.
+	RevokeAllSessions(ctx context.Context, userID uuid.UUID, exceptSessionID *uuid.UUID) error
+	// RevokeSessionByRefresh revokes the session identified by a raw refresh token (logout).
+	RevokeSessionByRefresh(ctx context.Context, rawRefresh string) error
+	// SessionIDByRefresh resolves the session id for a raw refresh token (current-session marker).
+	SessionIDByRefresh(ctx context.Context, rawRefresh string) (uuid.UUID, error)
+}
+
+// DeviceInfo describes the client opening or using a session (for device tracking).
+type DeviceInfo struct {
+	UserAgent  string
+	IPAddress  string
+	DeviceName string
+	Browser    string
+	OS         string
+}
+
+// Option configures a ServiceImpl at construction (e.g. token TTLs) without breaking
+// existing NewService callers.
+type Option func(*ServiceImpl)
+
+// WithAccessTTL overrides the short-lived access-token lifetime (default: sessionTTL).
+func WithAccessTTL(d time.Duration) Option {
+	return func(s *ServiceImpl) {
+		if d > 0 {
+			s.accessTTL = d
+		}
+	}
+}
+
+// WithRefreshTTL overrides the refresh-token (session) lifetime (default: 30 days).
+func WithRefreshTTL(d time.Duration) Option {
+	return func(s *ServiceImpl) {
+		if d > 0 {
+			s.refreshTTL = d
+		}
+	}
 }
 
 type Store interface {

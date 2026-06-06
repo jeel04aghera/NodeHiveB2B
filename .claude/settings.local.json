@@ -189,7 +189,11 @@
       "Bash(curl -s -o /dev/null -w \"login admin@dev.local -> HTTP %{http_code}\\\\n\" -X POST http://localhost:8080/api/v1/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"admin@dev.local\",\"password\":\"admin123\"}')",
       "Bash(git -C .. log --oneline -6)",
       "Bash(git -C .. status --short)",
-      "Bash(grep -n 'deleteAlertRule\\\\|return r$' internal/httpapi/router.go)"
+      "Bash(grep -n 'deleteAlertRule\\\\|return r$' internal/httpapi/router.go)",
+      "Bash(cat memory/MEMORY.md)",
+      "Bash(cat /Users/jeelaghera/.claude/projects/-Users-jeelaghera-Downloads-Koala/memory/project_nodehive.md)",
+      "Read(//Applications/Docker.app/**)",
+      "Bash(colima status *)"
     ]
   }
 }

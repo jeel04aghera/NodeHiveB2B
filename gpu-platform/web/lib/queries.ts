@@ -266,6 +266,45 @@ export function useStopWorkload() {
   });
 }
 
+// ── Sessions (Phase 2: active-device management) ──────────────────────────────
+export interface Session {
+  id: string;
+  user_id: string;
+  device_name: string;
+  browser: string;
+  os: string;
+  ip_address: string;
+  user_agent: string;
+  created_at: string;
+  last_active_at: string;
+  expires_at: string;
+  revoked_at?: string | null;
+  current: boolean;
+}
+
+export function useSessions() {
+  return useQuery({
+    queryKey: ["auth", "sessions"],
+    queryFn: () => api<Session[]>("/auth/sessions"),
+  });
+}
+
+export function useRevokeSession() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<void>(`/auth/sessions/${id}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["auth", "sessions"] }),
+  });
+}
+
+export function useRevokeAllSessions() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<void>("/auth/sessions/revoke-all", { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["auth", "sessions"] }),
+  });
+}
+
 export function useRates() {
   return useQuery({
     queryKey: ["billing", "rates"],

@@ -22,7 +22,13 @@ type GRPCConfig struct {
 }
 type AuthConfig struct {
 	JWTSecret  string
-	SessionTTL time.Duration
+	SessionTTL time.Duration // legacy single-token TTL; also the access-token fallback
+	// AccessTokenTTL is the short-lived Bearer access-token lifetime. Defaults to
+	// SessionTTL when ACCESS_TOKEN_TTL is unset, so existing deploys aren't silently
+	// changed; set ACCESS_TOKEN_TTL=15m for the recommended short-lived posture.
+	AccessTokenTTL time.Duration
+	// RefreshTokenTTL is the long-lived refresh-token (session) lifetime.
+	RefreshTokenTTL time.Duration
 }
 
 // GoogleOAuthConfig holds the credentials for "Sign in with Google". OAuth is enabled
@@ -64,7 +70,7 @@ func Load() (Config, error) {
 			CertFile: env("GRPC_CERT_FILE", ""),
 			KeyFile:  env("GRPC_KEY_FILE", ""),
 		},
-		Auth: AuthConfig{JWTSecret: env("JWT_SECRET", "dev-only-change-me"), SessionTTL: envDur("SESSION_TTL", 24*time.Hour)},
+		Auth: newAuthConfig(),
 		Google: GoogleOAuthConfig{
 			ClientID:     env("GOOGLE_CLIENT_ID", ""),
 			ClientSecret: env("GOOGLE_CLIENT_SECRET", ""),
@@ -77,6 +83,19 @@ func Load() (Config, error) {
 		DevBootstrapAdmin:  env("DEV_BOOTSTRAP_ADMIN", "admin@dev.local:admin123"),
 	}
 	return c, c.Validate()
+}
+
+// newAuthConfig resolves the auth/session TTLs. SESSION_TTL stays the legacy single-token
+// lifetime and the access-token fallback; ACCESS_TOKEN_TTL (recommended 15m) overrides the
+// access-token lifetime when set; REFRESH_TOKEN_TTL governs refresh sessions (default 30d).
+func newAuthConfig() AuthConfig {
+	sessionTTL := envDur("SESSION_TTL", 24*time.Hour)
+	return AuthConfig{
+		JWTSecret:       env("JWT_SECRET", "dev-only-change-me"),
+		SessionTTL:      sessionTTL,
+		AccessTokenTTL:  envDur("ACCESS_TOKEN_TTL", sessionTTL),
+		RefreshTokenTTL: envDur("REFRESH_TOKEN_TTL", 30*24*time.Hour),
+	}
 }
 
 // IsDev reports whether the control plane runs in development mode. ONLY in dev are

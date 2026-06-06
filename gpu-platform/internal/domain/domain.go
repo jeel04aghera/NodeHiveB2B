@@ -98,6 +98,23 @@ type EnrollmentToken struct {
 	Status      string     `json:"status"` // active | expired | revoked | exhausted (computed)
 }
 
+// Session is a server-side refresh-token session backing active-device management,
+// rotation and revocation. The raw refresh token is never stored — only its hash.
+type Session struct {
+	ID           uuid.UUID  `json:"id"`
+	UserID       uuid.UUID  `json:"user_id"`
+	DeviceName   string     `json:"device_name"`
+	Browser      string     `json:"browser"`
+	OS           string     `json:"os"`
+	IPAddress    string     `json:"ip_address"`
+	UserAgent    string     `json:"user_agent"`
+	CreatedAt    time.Time  `json:"created_at"`
+	LastActiveAt time.Time  `json:"last_active_at"`
+	ExpiresAt    time.Time  `json:"expires_at"`
+	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
+	Current      bool       `json:"current"` // true for the session making the request (computed)
+}
+
 type Project struct {
 	ID        uuid.UUID
 	OrgID     uuid.UUID

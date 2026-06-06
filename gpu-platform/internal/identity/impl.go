@@ -29,11 +29,34 @@ var (
 type ServiceImpl struct {
 	db         *pgxpool.Pool
 	jwtSecret  []byte
-	sessionTTL time.Duration
+	sessionTTL time.Duration // legacy/fallback access-token TTL
+	accessTTL  time.Duration // 0 => fall back to sessionTTL
+	refreshTTL time.Duration // 0 => default 30 days
 }
 
-func NewService(db *pgxpool.Pool, jwtSecret string, sessionTTL time.Duration) Service {
-	return &ServiceImpl{db: db, jwtSecret: []byte(jwtSecret), sessionTTL: sessionTTL}
+func NewService(db *pgxpool.Pool, jwtSecret string, sessionTTL time.Duration, opts ...Option) Service {
+	s := &ServiceImpl{db: db, jwtSecret: []byte(jwtSecret), sessionTTL: sessionTTL}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
+
+// accessTokenTTL is the effective short-lived access-token lifetime: the explicit
+// accessTTL if set, otherwise the legacy sessionTTL (backward compatible).
+func (s *ServiceImpl) accessTokenTTL() time.Duration {
+	if s.accessTTL > 0 {
+		return s.accessTTL
+	}
+	return s.sessionTTL
+}
+
+// refreshTokenTTL is the effective refresh-session lifetime (default 30 days).
+func (s *ServiceImpl) refreshTokenTTL() time.Duration {
+	if s.refreshTTL > 0 {
+		return s.refreshTTL
+	}
+	return 30 * 24 * time.Hour
 }
 
 type jwtClaims struct {
@@ -506,7 +529,7 @@ func (s *ServiceImpl) issueJWT(u domain.User) (string, error) {
 		OrgID:  oid,
 		Role:   string(u.Role),
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.sessionTTL)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.accessTokenTTL())),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}

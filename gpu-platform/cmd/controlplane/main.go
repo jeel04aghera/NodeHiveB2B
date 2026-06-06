@@ -72,7 +72,9 @@ func main() {
 	nodeRepo := nodes.NewRepo(pool)
 	nodeSvc := nodes.NewService(nodeRepo)
 
-	identitySvc := identity.NewService(pool, cfg.Auth.JWTSecret, cfg.Auth.SessionTTL)
+	identitySvc := identity.NewService(pool, cfg.Auth.JWTSecret, cfg.Auth.SessionTTL,
+		identity.WithAccessTTL(cfg.Auth.AccessTokenTTL),
+		identity.WithRefreshTTL(cfg.Auth.RefreshTokenTTL))
 	inventorySvc := inventory.NewService(pool)
 	billingSvc := billing.NewService(pool)
 	workloadsSvc := workloads.NewService(pool, agentDispatch, billingSvc)
@@ -144,6 +146,7 @@ func main() {
 			httpapi.WithAppBaseURL(cfg.AppBaseURL),
 			httpapi.WithCORSOrigins(cfg.CORSAllowedOrigins),
 			httpapi.WithSecureCookies(!cfg.IsDev()),
+			httpapi.WithRefreshCookieTTL(cfg.Auth.RefreshTokenTTL),
 		),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

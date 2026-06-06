@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func base() Config {
 	return Config{
@@ -40,6 +43,48 @@ func TestValidate_JWTSecret(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Phase 2: access-token TTL falls back to SESSION_TTL when ACCESS_TOKEN_TTL is unset
+// (so existing deploys aren't silently changed); ACCESS_TOKEN_TTL overrides it when set.
+// REFRESH_TOKEN_TTL defaults to 30 days.
+func TestAuthTTLResolution(t *testing.T) {
+	t.Run("defaults: access falls back to SESSION_TTL default (24h), refresh 30d", func(t *testing.T) {
+		a := newAuthConfig() // no env set
+		if a.SessionTTL != 24*time.Hour {
+			t.Errorf("SessionTTL=%v want 24h", a.SessionTTL)
+		}
+		if a.AccessTokenTTL != a.SessionTTL {
+			t.Errorf("AccessTokenTTL=%v should fall back to SessionTTL=%v", a.AccessTokenTTL, a.SessionTTL)
+		}
+		if a.RefreshTokenTTL != 30*24*time.Hour {
+			t.Errorf("RefreshTokenTTL=%v want 30d", a.RefreshTokenTTL)
+		}
+	})
+
+	t.Run("ACCESS_TOKEN_TTL overrides; SESSION_TTL still independent", func(t *testing.T) {
+		t.Setenv("SESSION_TTL", "12h")
+		t.Setenv("ACCESS_TOKEN_TTL", "15m")
+		t.Setenv("REFRESH_TOKEN_TTL", "720h")
+		a := newAuthConfig()
+		if a.SessionTTL != 12*time.Hour {
+			t.Errorf("SessionTTL=%v want 12h", a.SessionTTL)
+		}
+		if a.AccessTokenTTL != 15*time.Minute {
+			t.Errorf("AccessTokenTTL=%v want 15m", a.AccessTokenTTL)
+		}
+		if a.RefreshTokenTTL != 720*time.Hour {
+			t.Errorf("RefreshTokenTTL=%v want 720h", a.RefreshTokenTTL)
+		}
+	})
+
+	t.Run("only SESSION_TTL set -> access inherits it (backward compat)", func(t *testing.T) {
+		t.Setenv("SESSION_TTL", "8h")
+		a := newAuthConfig()
+		if a.AccessTokenTTL != 8*time.Hour {
+			t.Errorf("AccessTokenTTL=%v should inherit SESSION_TTL=8h", a.AccessTokenTTL)
+		}
+	})
 }
 
 // S3: dev bootstrap must be off unless ENV=development. main.go gates the DEV_*
