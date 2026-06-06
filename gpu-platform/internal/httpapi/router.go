@@ -17,6 +17,7 @@ import (
 	"github.com/nodehive/gpu-platform/internal/audit"
 	"github.com/nodehive/gpu-platform/internal/billing"
 	"github.com/nodehive/gpu-platform/internal/domain"
+	"github.com/nodehive/gpu-platform/internal/email"
 	"github.com/nodehive/gpu-platform/internal/identity"
 	"github.com/nodehive/gpu-platform/internal/inventory"
 	"github.com/nodehive/gpu-platform/internal/nodes"
@@ -45,6 +46,9 @@ type API struct {
 
 	// Sessions (Phase 2). refreshCookieTTL is the refresh-cookie Max-Age (0 => 30d default).
 	refreshCookieTTL time.Duration
+
+	// Email (Phase 3.5) — invitation delivery. nil => console fallback (dev).
+	email email.Sender
 }
 
 // Option configures optional API features without breaking existing NewRouter callers.
@@ -65,6 +69,9 @@ func WithSecureCookies(b bool) Option { return func(a *API) { a.secureCookies = 
 // WithRefreshCookieTTL sets the refresh-token cookie lifetime (default 30 days). Should
 // match the service's REFRESH_TOKEN_TTL so the cookie and the server session expire together.
 func WithRefreshCookieTTL(d time.Duration) Option { return func(a *API) { a.refreshCookieTTL = d } }
+
+// WithEmailSender wires the invitation email sender (console fallback used if unset).
+func WithEmailSender(s email.Sender) Option { return func(a *API) { a.email = s } }
 
 func NewRouter(
 	nodesSvc *nodes.Service,
@@ -193,6 +200,8 @@ func NewRouter(
 				r.Get("/org/members", a.listMembers)
 				r.Get("/org/invitations", a.listInvitations)
 				r.Get("/org/join-codes", a.listJoinCodes)
+				// Any member can leave their own org (last owner is blocked in the service).
+				r.Post("/org/leave", a.leaveOrg)
 				r.Group(func(r chi.Router) {
 					r.Use(a.requireRole(domain.RoleAdmin))
 					r.Patch("/org/members/{userId}/role", a.changeMemberRole)
@@ -202,6 +211,10 @@ func NewRouter(
 					r.Delete("/org/invitations/{id}", a.revokeInvitation)
 					r.Post("/org/join-codes", a.createJoinCode)
 					r.Delete("/org/join-codes/{id}", a.revokeJoinCode)
+				})
+				r.Group(func(r chi.Router) {
+					r.Use(a.requireRole(domain.RoleOwner))
+					r.Post("/org/transfer-ownership", a.transferOwnership)
 				})
 
 				// Users (admin only)

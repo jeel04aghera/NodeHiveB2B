@@ -174,6 +174,10 @@ type Invitation struct {
 	AcceptedAt *time.Time `json:"accepted_at,omitempty"`
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
 	Status     string     `json:"status"` // pending | accepted | expired | revoked (computed)
+	// Email delivery observability (Phase 3.5).
+	DeliveryStatus string     `json:"delivery_status"` // pending | sent | failed | skipped
+	DeliveryError  string     `json:"delivery_error,omitempty"`
+	DeliveredAt    *time.Time `json:"delivered_at,omitempty"`
 }
 
 // JoinCode is a shareable code that lets users self-join an org as members, bounded by

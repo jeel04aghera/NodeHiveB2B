@@ -326,6 +326,9 @@ export interface Invitation {
   created_at: string;
   expires_at: string;
   status: "pending" | "accepted" | "expired" | "revoked";
+  delivery_status: "pending" | "sent" | "failed" | "skipped";
+  delivery_error?: string;
+  delivered_at?: string | null;
 }
 export interface JoinCode {
   id: string;
@@ -353,6 +356,15 @@ export function useRemoveMember() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (userId: string) => api<void>(`/org/members/${userId}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["org", "members"] }),
+  });
+}
+
+export function useTransferOwnership() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (userId: string) =>
+      api<void>("/org/transfer-ownership", { method: "POST", body: JSON.stringify({ user_id: userId }) }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["org", "members"] }),
   });
 }

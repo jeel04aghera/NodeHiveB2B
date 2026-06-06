@@ -57,9 +57,15 @@ REFRESH_TOKEN_TTL=720h     # refresh-token session lifetime (720h = 30 days).
 # Cross-origin cookie auth: the frontend and API are separate Railway origins, so the
 # refresh cookie is cross-site. REQUIRED in production:
 CORS_ALLOWED_ORIGINS=https://<web-host>   # explicit allow-list, NO wildcard; enables credentials.
-APP_BASE_URL=https://<web-host>           # also used by the Google OAuth callback redirect.
+APP_BASE_URL=https://<web-host>           # OAuth callback redirect + invitation accept links.
 # In production (ENV unset/production) cookies are emitted Secure + SameSite=None, which the
 # browser only accepts over HTTPS — Railway serves HTTPS, so this works out of the box.
+
+# --- Invitation email (Phase 3.5) ---
+RESEND_API_KEY=re_xxxxxxxx                 # Resend API key. Unset => emails logged to console.
+INVITE_FROM_EMAIL=NodeHive <noreply@yourdomain.com>  # verified Resend sender; required to send.
+# When both are set, invites are emailed (async) and the raw invite token is NO LONGER
+# returned in the API response. When unset, invites still work — the URL is returned/logged.
 ```
 
 > **Generate the secret:** `openssl rand -hex 32`. If `JWT_SECRET` is unset or a known

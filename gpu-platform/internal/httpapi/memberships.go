@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nodehive/gpu-platform/internal/domain"
+	"github.com/nodehive/gpu-platform/internal/email"
 	"github.com/nodehive/gpu-platform/internal/identity"
 )
 
@@ -123,9 +126,21 @@ func (a *API) createInvitation(w http.ResponseWriter, r *http.Request) {
 		writeMembershipErr(w, err)
 		return
 	}
-	// No email infrastructure yet: return the shareable invite token (like enrollment
-	// tokens) so the admin can send the accept link. The link is APP_BASE_URL/invite?token=…
-	writeJSON(w, 201, map[string]any{"invitation": inv, "token": raw, "accept_url": a.inviteURL(raw)})
+	a.dispatchInviteEmail(inv, raw) // async; creation already succeeded
+	// In dev (email disabled) we still return the shareable invite token + accept link so
+	// the admin can deliver it manually. In prod the email carries the link.
+	writeJSON(w, 201, a.inviteResponse(inv, raw))
+}
+
+// inviteResponse returns the token + accept URL only when email is disabled (dev), so a
+// configured production deployment never leaks the raw token in the API response.
+func (a *API) inviteResponse(inv domain.Invitation, raw string) map[string]any {
+	resp := map[string]any{"invitation": inv}
+	if a.email == nil || !a.email.Enabled() {
+		resp["token"] = raw
+		resp["accept_url"] = a.inviteURL(raw)
+	}
+	return resp
 }
 
 func (a *API) resendInvitation(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +155,75 @@ func (a *API) resendInvitation(w http.ResponseWriter, r *http.Request) {
 		writeMembershipErr(w, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"invitation": inv, "token": raw, "accept_url": a.inviteURL(raw)})
+	a.dispatchInviteEmail(inv, raw) // re-send asynchronously
+	writeJSON(w, 200, a.inviteResponse(inv, raw))
+}
+
+// dispatchInviteEmail sends the invitation email asynchronously and records the delivery
+// outcome. Invitation creation has already succeeded, so a send failure never fails the
+// request — it's recorded as 'failed' for observability and the admin can resend.
+func (a *API) dispatchInviteEmail(inv domain.Invitation, rawToken string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		orgName, _ := a.identity.OrgName(ctx, inv.OrgID)
+		acceptURL := a.inviteURL(rawToken)
+		msg := email.BuildInviteEmail(string(inv.Email), orgName, string(inv.Role), acceptURL)
+
+		// Provider disabled (dev): log the email and mark delivery 'skipped'.
+		if a.email == nil || !a.email.Enabled() {
+			if a.email != nil {
+				_ = a.email.Send(ctx, msg)
+			} else {
+				log.Printf("[invite email skipped] to=%s org=%q url=%s", inv.Email, orgName, acceptURL)
+			}
+			_ = a.identity.UpdateInvitationDelivery(ctx, inv.ID, "skipped", "")
+			return
+		}
+		if err := a.email.Send(ctx, msg); err != nil {
+			_ = a.identity.UpdateInvitationDelivery(ctx, inv.ID, "failed", err.Error())
+			return
+		}
+		_ = a.identity.UpdateInvitationDelivery(ctx, inv.ID, "sent", "")
+	}()
+}
+
+// ── Lifecycle: leave + ownership transfer ────────────────────────────────────
+
+func (a *API) leaveOrg(w http.ResponseWriter, r *http.Request) {
+	u := userFromCtx(r)
+	var except *uuid.UUID
+	if id, err := a.identity.SessionIDByRefresh(r.Context(), readRefreshCookie(r)); err == nil {
+		except = &id
+	}
+	token, user, err := a.identity.LeaveOrg(r.Context(), u.OrgID, u.ID, u.Role, except)
+	if err != nil {
+		writeMembershipErr(w, err)
+		return
+	}
+	// The user is now pre-onboarding; hand back a fresh org-less token for the SPA to adopt.
+	writeJSON(w, 200, map[string]any{"token": token, "user": userResponse(user)})
+}
+
+func (a *API) transferOwnership(w http.ResponseWriter, r *http.Request) {
+	u := userFromCtx(r)
+	var body struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "validation", "invalid JSON")
+		return
+	}
+	target, err := uuid.Parse(body.UserID)
+	if err != nil {
+		writeErr(w, 400, "validation", "invalid user id")
+		return
+	}
+	if err := a.identity.TransferOwnership(r.Context(), u.OrgID, u.ID, u.Role, target); err != nil {
+		writeMembershipErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *API) revokeInvitation(w http.ResponseWriter, r *http.Request) {

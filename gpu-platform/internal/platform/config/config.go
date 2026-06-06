@@ -43,6 +43,16 @@ func (g GoogleOAuthConfig) Enabled() bool {
 	return g.ClientID != "" && g.ClientSecret != "" && g.RedirectURL != ""
 }
 
+// EmailConfig holds transactional-email (Resend) settings for invitation delivery. Email
+// is enabled only when both the API key and from-address are set; otherwise a console
+// fallback logs the email and the raw invite URL is still returned (dev behavior).
+type EmailConfig struct {
+	ResendAPIKey string
+	FromEmail    string
+}
+
+func (e EmailConfig) Enabled() bool { return e.ResendAPIKey != "" && e.FromEmail != "" }
+
 type Config struct {
 	Env                string // "development" or "production" (default). Gates dev bootstrap + secret checks.
 	DB                 DBConfig
@@ -50,6 +60,7 @@ type Config struct {
 	GRPC               GRPCConfig
 	Auth               AuthConfig
 	Google             GoogleOAuthConfig
+	Email              EmailConfig
 	AppBaseURL         string   // frontend origin the OAuth callback redirects back to
 	CORSAllowedOrigins []string // explicit allow-list; empty => permissive "*" (dev only, no credentials)
 	DevOrgSlug         string   // org that dev nodes enroll into (matches scripts/seed_dev.sql)
@@ -75,6 +86,10 @@ func Load() (Config, error) {
 			ClientID:     env("GOOGLE_CLIENT_ID", ""),
 			ClientSecret: env("GOOGLE_CLIENT_SECRET", ""),
 			RedirectURL:  env("GOOGLE_REDIRECT_URL", ""),
+		},
+		Email: EmailConfig{
+			ResendAPIKey: env("RESEND_API_KEY", ""),
+			FromEmail:    env("INVITE_FROM_EMAIL", ""),
 		},
 		AppBaseURL:         strings.TrimRight(env("APP_BASE_URL", ""), "/"),
 		CORSAllowedOrigins: splitNonEmpty(env("CORS_ALLOWED_ORIGINS", "")),

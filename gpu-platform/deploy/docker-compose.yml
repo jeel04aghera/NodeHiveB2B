@@ -39,6 +39,8 @@ services:
       JWT_SECRET: "local-dev-only-secret-not-for-prod"
       ACCESS_TOKEN_TTL: "15m"   # Phase 2: short-lived access token
       REFRESH_TOKEN_TTL: "720h" # Phase 2: 30-day refresh session
+      APP_BASE_URL: "http://localhost:3000" # Phase 3.5: invite accept-link base
+      # RESEND_API_KEY / INVITE_FROM_EMAIL unset => invite emails logged to console (dev).
       DEV_ORG_SLUG: "dev"
       DEV_ENROLLMENT_TOKEN: "dev-enroll-token"
       DEV_BOOTSTRAP_ADMIN: "admin@dev.local:admin123"

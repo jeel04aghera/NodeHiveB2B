@@ -70,10 +70,20 @@ type Service interface {
 	// RemoveMember removes a user from the org (they revert to pre-onboarding).
 	RemoveMember(ctx context.Context, orgID, actorID uuid.UUID, actorRole domain.Role, targetUserID uuid.UUID) error
 
+	// LeaveOrg removes the caller from their org (reverting to pre-onboarding) and revokes
+	// every session except the current one. The last owner cannot leave.
+	LeaveOrg(ctx context.Context, orgID, userID uuid.UUID, role domain.Role, exceptSessionID *uuid.UUID) (token string, user domain.User, err error)
+	// TransferOwnership makes targetUserID the org's owner and demotes the acting owner to admin.
+	TransferOwnership(ctx context.Context, orgID, actorID uuid.UUID, actorRole domain.Role, targetUserID uuid.UUID) error
+
 	CreateInvitation(ctx context.Context, orgID, invitedBy uuid.UUID, email string, role domain.Role) (rawToken string, inv domain.Invitation, err error)
 	ListInvitations(ctx context.Context, orgID uuid.UUID) ([]domain.Invitation, error)
 	RevokeInvitation(ctx context.Context, orgID, invID uuid.UUID) error
 	ResendInvitation(ctx context.Context, orgID, invID uuid.UUID) (rawToken string, inv domain.Invitation, err error)
+	// UpdateInvitationDelivery records the outcome of the async email send (observability).
+	UpdateInvitationDelivery(ctx context.Context, invID uuid.UUID, status, errMsg string) error
+	// OrgName returns an organization's display name (for invite emails).
+	OrgName(ctx context.Context, orgID uuid.UUID) (string, error)
 	// InvitationByToken previews a pending invite (public, for the accept page).
 	InvitationByToken(ctx context.Context, rawToken string) (inv domain.Invitation, orgName string, err error)
 	// AcceptInvitation joins the inviting org; the user's email must match the invite.

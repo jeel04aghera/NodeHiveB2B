@@ -27,6 +27,8 @@ interface AuthCtx {
   // acceptInvitation / joinWithCode attach a pre-onboarding user to an existing org.
   acceptInvitation: (token: string) => Promise<CurrentUser>;
   joinWithCode: (code: string) => Promise<CurrentUser>;
+  // leaveOrg removes the user from their org; they return to the pre-onboarding state.
+  leaveOrg: () => Promise<void>;
   logout: () => void;
 }
 
@@ -158,6 +160,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return r.user;
   }
 
+  async function leaveOrg(): Promise<void> {
+    const r = await api<{ token: string; user: CurrentUser }>("/org/leave", { method: "POST" });
+    localStorage.setItem(KEY, r.token);
+    setToken(r.token);
+    setUser(r.user);
+  }
+
   function logout() {
     // Revoke the server-side session + clear the refresh cookie (best-effort), then drop
     // local state regardless of the network result.
@@ -168,7 +177,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <Ctx.Provider value={{ user, ready, login, register, loginWithToken, createOrg, registerPending, acceptInvitation, joinWithCode, logout }}>
+    <Ctx.Provider value={{ user, ready, login, register, loginWithToken, createOrg, registerPending, acceptInvitation, joinWithCode, leaveOrg, logout }}>
       {children}
     </Ctx.Provider>
   );

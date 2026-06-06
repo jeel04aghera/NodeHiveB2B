@@ -1,16 +1,17 @@
 "use client";
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useAuth, roleLabel } from "@/lib/auth";
 import {
-  useMembers, useChangeMemberRole, useRemoveMember,
+  useMembers, useChangeMemberRole, useRemoveMember, useTransferOwnership,
   useInvitations, useCreateInvitation, useResendInvitation, useRevokeInvitation,
   useJoinCodes, useCreateJoinCode, useRevokeJoinCode,
   type Member,
 } from "@/lib/queries";
 import {
-  Card, CardHeader, Table, Row, Cell, Badge, Button, Input, Select, FormField, CopyButton,
+  Card, CardHeader, Table, Row, Cell, Badge, Button, Input, Select, FormField, CopyButton, Modal,
 } from "@/components/ui";
-import { Plus, Trash2, Send, UserMinus } from "lucide-react";
+import { Plus, Trash2, Send, UserMinus, LogOut, Crown } from "lucide-react";
 
 function roleTone(role: string) {
   return role === "owner" ? "blue" : role === "admin" ? "amber" : "neutral";
@@ -18,15 +19,45 @@ function roleTone(role: string) {
 function inviteTone(status: string) {
   return status === "pending" ? "amber" : status === "accepted" ? "green" : "neutral";
 }
+function deliveryTone(s: string) {
+  return s === "sent" ? "green" : s === "failed" ? "red" : s === "skipped" ? "neutral" : "amber";
+}
 
 /** Organization administration: members & roles, pending invitations, and join codes. */
 export function OrgMembers() {
-  const { user } = useAuth();
+  const { user, leaveOrg } = useAuth();
+  const router = useRouter();
   const isOwner = user?.role === "owner";
 
   const { data: members, isLoading: membersLoading } = useMembers();
   const changeRole = useChangeMemberRole();
   const removeMember = useRemoveMember();
+  const transferOwnership = useTransferOwnership();
+
+  const [showTransfer, setShowTransfer] = useState(false);
+  const [transferTo, setTransferTo] = useState("");
+  const [actionError, setActionError] = useState("");
+
+  async function handleLeave() {
+    setActionError("");
+    if (!confirm("Leave this organization? You'll lose access until you join again.")) return;
+    try {
+      await leaveOrg();
+      router.replace("/onboarding");
+    } catch {
+      setActionError("Could not leave — the last owner must transfer ownership first.");
+    }
+  }
+  async function handleTransfer() {
+    if (!transferTo) return;
+    setActionError("");
+    try {
+      await transferOwnership.mutateAsync(transferTo);
+      setShowTransfer(false); setTransferTo("");
+    } catch {
+      setActionError("Could not transfer ownership.");
+    }
+  }
 
   const { data: invites } = useInvitations();
   const createInvite = useCreateInvitation();
@@ -72,11 +103,30 @@ export function OrgMembers() {
     return true;
   }
 
+  const otherMembers = (members ?? []).filter((m) => m.user_id !== user?.id);
+
   return (
     <div className="space-y-4">
+      {actionError && <p className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">{actionError}</p>}
+
       {/* Members */}
       <Card className="overflow-hidden">
-        <CardHeader title="Members" meta={`${members?.length ?? 0} in this organization`} />
+        <CardHeader
+          title="Members"
+          meta={`${members?.length ?? 0} in this organization`}
+          actions={
+            <div className="flex gap-2">
+              {isOwner && otherMembers.length > 0 && (
+                <Button variant="secondary" size="sm" onClick={() => setShowTransfer(true)}>
+                  <Crown size={12} /> Transfer ownership
+                </Button>
+              )}
+              <Button variant="danger" size="sm" onClick={handleLeave}>
+                <LogOut size={12} /> Leave organization
+              </Button>
+            </div>
+          }
+        />
         {membersLoading ? (
           <div className="py-6 text-center text-sm text-ink-muted">Loading members…</div>
         ) : (
@@ -147,18 +197,25 @@ export function OrgMembers() {
       <Card className="overflow-hidden">
         <CardHeader title="Pending invitations" />
         {!invites?.length ? <div className="py-6 text-center text-sm text-ink-muted">No invitations.</div> : (
-          <Table columns={[{ key: "e", label: "Email" }, { key: "r", label: "Role" }, { key: "s", label: "Status" }, { key: "x", label: "Expires" }, { key: "a", label: "", align: "right" }]}>
+          <Table columns={[{ key: "e", label: "Email" }, { key: "r", label: "Role" }, { key: "s", label: "Status" }, { key: "d", label: "Delivery" }, { key: "x", label: "Expires" }, { key: "a", label: "", align: "right" }]}>
             {invites.map((inv) => (
               <Row key={inv.id}>
                 <Cell className="text-ink">{inv.email}</Cell>
                 <Cell><Badge tone={roleTone(inv.role)}>{roleLabel(inv.role)}</Badge></Cell>
                 <Cell><Badge tone={inviteTone(inv.status)} dot>{inv.status}</Badge></Cell>
+                <Cell>
+                  <span title={inv.delivery_error || undefined}>
+                    <Badge tone={deliveryTone(inv.delivery_status)} dot>{inv.delivery_status}</Badge>
+                  </span>
+                </Cell>
                 <Cell className="text-xs">{new Date(inv.expires_at).toLocaleDateString()}</Cell>
                 <Cell align="right">
                   {inv.status === "pending" && (
                     <div className="flex justify-end gap-2">
-                      <Button variant="secondary" size="sm" disabled={resendInvite.isPending}
-                        onClick={async () => { const r = await resendInvite.mutateAsync(inv.id); setLastInviteLink(r.accept_url || r.token); }}>Resend</Button>
+                      <Button variant={inv.delivery_status === "failed" ? "primary" : "secondary"} size="sm" disabled={resendInvite.isPending}
+                        onClick={async () => { const r = await resendInvite.mutateAsync(inv.id); setLastInviteLink(r.accept_url || r.token || null); }}>
+                        {inv.delivery_status === "failed" ? "Retry send" : "Resend"}
+                      </Button>
                       <Button variant="danger" size="sm" disabled={revokeInvite.isPending} onClick={() => revokeInvite.mutate(inv.id)}>
                         <Trash2 size={12} /> Revoke
                       </Button>
@@ -220,6 +277,28 @@ export function OrgMembers() {
           </Table>
         )}
       </Card>
+
+      {showTransfer && (
+        <Modal title="Transfer ownership" onClose={() => setShowTransfer(false)} maxWidth="max-w-md">
+          <div className="space-y-4 p-5">
+            <p className="text-sm text-ink-muted">
+              Choose a member to become the new owner. You'll be demoted to <strong>admin</strong>. This can't be undone by you afterward.
+            </p>
+            <FormField label="New owner">
+              <Select value={transferTo} onChange={(e) => setTransferTo(e.target.value)}>
+                <option value="">— select a member —</option>
+                {otherMembers.map((m) => <option key={m.user_id} value={m.user_id}>{m.name || m.email} ({roleLabel(m.role)})</option>)}
+              </Select>
+            </FormField>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" size="sm" onClick={() => setShowTransfer(false)}>Cancel</Button>
+              <Button variant="primary" size="sm" disabled={!transferTo || transferOwnership.isPending} onClick={handleTransfer}>
+                {transferOwnership.isPending ? "Transferring…" : "Transfer ownership"}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

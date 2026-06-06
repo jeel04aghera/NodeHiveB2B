@@ -24,6 +24,7 @@ import (
 	"github.com/nodehive/gpu-platform/internal/audit"
 	"github.com/nodehive/gpu-platform/internal/billing"
 	"github.com/nodehive/gpu-platform/internal/domain"
+	"github.com/nodehive/gpu-platform/internal/email"
 	"github.com/nodehive/gpu-platform/internal/httpapi"
 	"github.com/nodehive/gpu-platform/internal/identity"
 	"github.com/nodehive/gpu-platform/internal/inventory"
@@ -147,6 +148,7 @@ func main() {
 			httpapi.WithCORSOrigins(cfg.CORSAllowedOrigins),
 			httpapi.WithSecureCookies(!cfg.IsDev()),
 			httpapi.WithRefreshCookieTTL(cfg.Auth.RefreshTokenTTL),
+			httpapi.WithEmailSender(email.NewSender(cfg.Email.ResendAPIKey, cfg.Email.FromEmail, log)),
 		),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

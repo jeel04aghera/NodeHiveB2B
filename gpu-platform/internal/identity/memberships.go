@@ -183,6 +183,105 @@ func (s *ServiceImpl) memberRole(ctx context.Context, orgID, userID uuid.UUID) (
 	return domain.Role(role), err
 }
 
+// LeaveOrg removes the caller from their org (reverting to pre-onboarding), revoking every
+// session except the current one, and returns a fresh org-less token. The last owner can't
+// leave (would orphan the org) — they must transfer ownership or delete the org first.
+func (s *ServiceImpl) LeaveOrg(ctx context.Context, orgID, userID uuid.UUID, role domain.Role, exceptSessionID *uuid.UUID) (string, domain.User, error) {
+	if role.Normalize() == domain.RoleOwner {
+		if n, err := s.ownerCount(ctx, orgID); err != nil {
+			return "", domain.User{}, err
+		} else if n < 2 {
+			return "", domain.User{}, ErrLastOwner
+		}
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return "", domain.User{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2`, orgID, userID); err != nil {
+		return "", domain.User{}, err
+	}
+	var u domain.User
+	if err := tx.QueryRow(ctx,
+		`UPDATE users SET org_id=NULL, role='member' WHERE id=$1 AND org_id=$2
+		 RETURNING id, org_id, department_id, email, name, role, status, avatar_url, email_verified, auth_provider`,
+		userID, orgID).
+		Scan(&u.ID, &u.OrgID, &u.DepartmentID, &u.Email, &u.Name, &u.Role, &u.Status,
+			&u.AvatarURL, &u.EmailVerified, &u.AuthProvider); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", domain.User{}, ErrNotFound // not actually a member of this org
+		}
+		return "", domain.User{}, err
+	}
+	// Keep the current device signed in (now in onboarding state); revoke the rest.
+	if _, err := tx.Exec(ctx,
+		`UPDATE user_sessions SET revoked_at=now()
+		   WHERE user_id=$1 AND revoked_at IS NULL AND ($2::uuid IS NULL OR id <> $2)`,
+		userID, exceptSessionID); err != nil {
+		return "", domain.User{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", domain.User{}, err
+	}
+	u.OrgID = uuid.Nil
+	tok, err := s.issueJWT(u)
+	return tok, u, err
+}
+
+// TransferOwnership promotes targetUserID to owner and demotes the acting owner to admin,
+// atomically. Only an owner may call it; the target must already be a member. After the
+// transfer exactly one owner remains (the standard single-owner org).
+func (s *ServiceImpl) TransferOwnership(ctx context.Context, orgID, actorID uuid.UUID, actorRole domain.Role, targetUserID uuid.UUID) error {
+	if actorRole.Normalize() != domain.RoleOwner {
+		return fmt.Errorf("%w: only the owner can transfer ownership", ErrForbidden)
+	}
+	if actorID == targetUserID {
+		return fmt.Errorf("%w: you are already the owner", ErrForbidden)
+	}
+	if _, err := s.memberRole(ctx, orgID, targetUserID); err != nil {
+		return err // ErrNotFound if the target isn't a member of this org
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	// Demote the acting owner, promote the target. Mirror onto users.role.
+	for _, op := range []struct {
+		uid  uuid.UUID
+		role string
+	}{{actorID, "admin"}, {targetUserID, "owner"}} {
+		if _, err := tx.Exec(ctx, `UPDATE organization_members SET role=$3 WHERE org_id=$1 AND user_id=$2`, orgID, op.uid, op.role); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE users SET role=$3 WHERE id=$2 AND org_id=$1`, orgID, op.uid, op.role); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// UpdateInvitationDelivery records the async email-send outcome (advisory observability).
+func (s *ServiceImpl) UpdateInvitationDelivery(ctx context.Context, invID uuid.UUID, status, errMsg string) error {
+	var deliveredAt any
+	if status == "sent" {
+		deliveredAt = time.Now()
+	}
+	_, err := s.db.Exec(ctx,
+		`UPDATE organization_invitations SET delivery_status=$2, delivery_error=$3, delivered_at=$4 WHERE id=$1`,
+		invID, status, errMsg, deliveredAt)
+	return err
+}
+
+// OrgName returns an organization's display name (for invite emails).
+func (s *ServiceImpl) OrgName(ctx context.Context, orgID uuid.UUID) (string, error) {
+	var name string
+	err := s.db.QueryRow(ctx, `SELECT name FROM organizations WHERE id=$1`, orgID).Scan(&name)
+	return name, err
+}
+
 func (s *ServiceImpl) ownerCount(ctx context.Context, orgID uuid.UUID) (int, error) {
 	var n int
 	err := s.db.QueryRow(ctx, `SELECT count(*) FROM organization_members WHERE org_id=$1 AND role='owner'`, orgID).Scan(&n)
@@ -221,9 +320,9 @@ func (s *ServiceImpl) CreateInvitation(ctx context.Context, orgID, invitedBy uui
 	err := s.db.QueryRow(ctx,
 		`INSERT INTO organization_invitations (org_id, email, role, token_hash, invited_by, expires_at)
 		 VALUES ($1,$2,$3,$4,$5,$6)
-		 RETURNING id, org_id, email, role, invited_by, created_at, expires_at, accepted_at, revoked_at`,
+		 RETURNING `+inviteCols,
 		orgID, email, string(role), hashToken(raw), invitedBy, time.Now().Add(invitationTTL)).
-		Scan(&inv.ID, &inv.OrgID, &inv.Email, &inv.Role, &inv.InvitedBy, &inv.CreatedAt, &inv.ExpiresAt, &inv.AcceptedAt, &inv.RevokedAt)
+		Scan(scanInvite(&inv)...)
 	if err != nil {
 		return "", domain.Invitation{}, fmt.Errorf("create invitation: %w", err)
 	}
@@ -231,10 +330,18 @@ func (s *ServiceImpl) CreateInvitation(ctx context.Context, orgID, invitedBy uui
 	return raw, inv, nil
 }
 
+// inviteCols / scanInvite keep the invitation projection in one place (incl. delivery fields).
+const inviteCols = `id, org_id, email, role, invited_by, created_at, expires_at,
+	accepted_at, revoked_at, delivery_status, delivery_error, delivered_at`
+
+func scanInvite(inv *domain.Invitation) []any {
+	return []any{&inv.ID, &inv.OrgID, &inv.Email, &inv.Role, &inv.InvitedBy, &inv.CreatedAt,
+		&inv.ExpiresAt, &inv.AcceptedAt, &inv.RevokedAt, &inv.DeliveryStatus, &inv.DeliveryError, &inv.DeliveredAt}
+}
+
 func (s *ServiceImpl) ListInvitations(ctx context.Context, orgID uuid.UUID) ([]domain.Invitation, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, org_id, email, role, invited_by, created_at, expires_at, accepted_at, revoked_at
-		   FROM organization_invitations WHERE org_id=$1 ORDER BY created_at DESC`, orgID)
+		`SELECT `+inviteCols+` FROM organization_invitations WHERE org_id=$1 ORDER BY created_at DESC`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +349,7 @@ func (s *ServiceImpl) ListInvitations(ctx context.Context, orgID uuid.UUID) ([]d
 	out := []domain.Invitation{}
 	for rows.Next() {
 		var inv domain.Invitation
-		if err := rows.Scan(&inv.ID, &inv.OrgID, &inv.Email, &inv.Role, &inv.InvitedBy,
-			&inv.CreatedAt, &inv.ExpiresAt, &inv.AcceptedAt, &inv.RevokedAt); err != nil {
+		if err := rows.Scan(scanInvite(&inv)...); err != nil {
 			return nil, err
 		}
 		inv.Status = invitationStatus(inv)
@@ -272,11 +378,12 @@ func (s *ServiceImpl) ResendInvitation(ctx context.Context, orgID, invID uuid.UU
 	var inv domain.Invitation
 	err := s.db.QueryRow(ctx,
 		`UPDATE organization_invitations
-		    SET token_hash=$3, expires_at=$4
+		    SET token_hash=$3, expires_at=$4,
+		        delivery_status='pending', delivery_error='', delivered_at=NULL
 		  WHERE id=$1 AND org_id=$2 AND accepted_at IS NULL AND revoked_at IS NULL
-		RETURNING id, org_id, email, role, invited_by, created_at, expires_at, accepted_at, revoked_at`,
+		RETURNING `+inviteCols,
 		invID, orgID, hashToken(raw), time.Now().Add(invitationTTL)).
-		Scan(&inv.ID, &inv.OrgID, &inv.Email, &inv.Role, &inv.InvitedBy, &inv.CreatedAt, &inv.ExpiresAt, &inv.AcceptedAt, &inv.RevokedAt)
+		Scan(scanInvite(&inv)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", domain.Invitation{}, ErrNotFound
 	}
@@ -296,11 +403,11 @@ func (s *ServiceImpl) InvitationByToken(ctx context.Context, rawToken string) (d
 	var orgName string
 	err := s.db.QueryRow(ctx,
 		`SELECT i.id, i.org_id, i.email, i.role, i.invited_by, i.created_at, i.expires_at,
-		        i.accepted_at, i.revoked_at, o.name
+		        i.accepted_at, i.revoked_at, i.delivery_status, i.delivery_error, i.delivered_at, o.name
 		   FROM organization_invitations i JOIN organizations o ON o.id=i.org_id
 		  WHERE i.token_hash=$1`, hashToken(rawToken)).
 		Scan(&inv.ID, &inv.OrgID, &inv.Email, &inv.Role, &inv.InvitedBy, &inv.CreatedAt,
-			&inv.ExpiresAt, &inv.AcceptedAt, &inv.RevokedAt, &orgName)
+			&inv.ExpiresAt, &inv.AcceptedAt, &inv.RevokedAt, &inv.DeliveryStatus, &inv.DeliveryError, &inv.DeliveredAt, &orgName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Invitation{}, "", ErrInvitationInvalid
 	}
