@@ -58,6 +58,32 @@ type Service interface {
 	RevokeSessionByRefresh(ctx context.Context, rawRefresh string) error
 	// SessionIDByRefresh resolves the session id for a raw refresh token (current-session marker).
 	SessionIDByRefresh(ctx context.Context, rawRefresh string) (uuid.UUID, error)
+
+	// ── Organization memberships, invitations, join codes (Phase 3) ───────────
+	// RegisterPending creates a password account with NO organization (pre-onboarding),
+	// for users who will accept an invite or join via code rather than create an org.
+	RegisterPending(ctx context.Context, email, name, password string) (token string, user domain.User, err error)
+
+	ListMembers(ctx context.Context, orgID uuid.UUID) ([]domain.Member, error)
+	// ChangeMemberRole updates a member's role, enforcing the role hierarchy (see rules in impl).
+	ChangeMemberRole(ctx context.Context, orgID, actorID uuid.UUID, actorRole domain.Role, targetUserID uuid.UUID, newRole domain.Role) error
+	// RemoveMember removes a user from the org (they revert to pre-onboarding).
+	RemoveMember(ctx context.Context, orgID, actorID uuid.UUID, actorRole domain.Role, targetUserID uuid.UUID) error
+
+	CreateInvitation(ctx context.Context, orgID, invitedBy uuid.UUID, email string, role domain.Role) (rawToken string, inv domain.Invitation, err error)
+	ListInvitations(ctx context.Context, orgID uuid.UUID) ([]domain.Invitation, error)
+	RevokeInvitation(ctx context.Context, orgID, invID uuid.UUID) error
+	ResendInvitation(ctx context.Context, orgID, invID uuid.UUID) (rawToken string, inv domain.Invitation, err error)
+	// InvitationByToken previews a pending invite (public, for the accept page).
+	InvitationByToken(ctx context.Context, rawToken string) (inv domain.Invitation, orgName string, err error)
+	// AcceptInvitation joins the inviting org; the user's email must match the invite.
+	AcceptInvitation(ctx context.Context, userID uuid.UUID, rawToken string) (token string, user domain.User, err error)
+
+	CreateJoinCode(ctx context.Context, orgID, createdBy uuid.UUID, desc string, ttl time.Duration, maxUses int) (rawCode string, err error)
+	ListJoinCodes(ctx context.Context, orgID uuid.UUID) ([]domain.JoinCode, error)
+	RevokeJoinCode(ctx context.Context, orgID, codeID uuid.UUID) error
+	// JoinViaCode self-joins an org as a member using a shareable code.
+	JoinViaCode(ctx context.Context, userID uuid.UUID, rawCode string) (token string, user domain.User, err error)
 }
 
 // DeviceInfo describes the client opening or using a session (for device tracking).

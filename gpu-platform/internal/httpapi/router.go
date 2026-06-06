@@ -114,6 +114,10 @@ func NewRouter(
 		r.Post("/auth/refresh", a.refresh)
 		r.Post("/auth/logout", a.logout)
 
+		// Invite signup (no org) + public invitation preview (token-gated).
+		r.Post("/auth/register-pending", a.registerPending)
+		r.Get("/auth/invitations/{token}", a.previewInvitation)
+
 		// Google OAuth (public). Handlers no-op with 404 when OAuth isn't configured.
 		r.Get("/auth/google/start", a.googleStart)
 		r.Get("/auth/google/callback", a.googleCallback)
@@ -125,6 +129,9 @@ func NewRouter(
 			// Pre-onboarding users (no org yet) may ONLY reach these:
 			r.Get("/me", a.me)
 			r.Post("/onboarding/organization", a.onboardingCreateOrg)
+			// Join an existing org instead of creating one (invite token / join code).
+			r.Post("/onboarding/accept-invitation", a.acceptInvitation)
+			r.Post("/onboarding/join-code", a.joinViaCode)
 
 			// Active session management (available to every authenticated user, incl.
 			// pre-onboarding — they still have devices/sessions to manage).
@@ -180,6 +187,22 @@ func NewRouter(
 				// Departments (org structure)
 				r.Get("/departments", a.listDepartments)
 				r.Post("/departments", a.createDepartment) // admin
+
+				// Organization membership, roles, invitations, join codes (Phase 3).
+				// Read is available to any member; mutations require admin (owner ≥ admin).
+				r.Get("/org/members", a.listMembers)
+				r.Get("/org/invitations", a.listInvitations)
+				r.Get("/org/join-codes", a.listJoinCodes)
+				r.Group(func(r chi.Router) {
+					r.Use(a.requireRole(domain.RoleAdmin))
+					r.Patch("/org/members/{userId}/role", a.changeMemberRole)
+					r.Delete("/org/members/{userId}", a.removeMember)
+					r.Post("/org/invitations", a.createInvitation)
+					r.Post("/org/invitations/{id}/resend", a.resendInvitation)
+					r.Delete("/org/invitations/{id}", a.revokeInvitation)
+					r.Post("/org/join-codes", a.createJoinCode)
+					r.Delete("/org/join-codes/{id}", a.revokeJoinCode)
+				})
 
 				// Users (admin only)
 				r.Get("/users", a.listUsers)
@@ -584,7 +607,7 @@ func (a *API) stopWorkload(w http.ResponseWriter, r *http.Request) {
 	}
 	u := userFromCtx(r)
 	reason := domain.StopUser
-	if u.Role == domain.RoleAdmin {
+	if u.Role.AtLeast(domain.RoleAdmin) {
 		if r.URL.Query().Get("reason") == "admin" {
 			reason = domain.StopAdmin
 		}
@@ -754,7 +777,7 @@ func (a *API) listRates(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) setRate(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}
@@ -806,7 +829,7 @@ func (a *API) creditLedger(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) topupCredits(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}
@@ -876,7 +899,7 @@ func (a *API) listUsers(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}
@@ -890,7 +913,7 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "validation", "invalid JSON")
 		return
 	}
-	role := domain.RoleUser
+	role := domain.RoleMember
 	if body.Role == "admin" {
 		role = domain.RoleAdmin
 	}
@@ -919,7 +942,7 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) issueToken(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}

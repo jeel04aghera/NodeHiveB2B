@@ -2,11 +2,11 @@
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
-  useRates, useSetRate, useUsers, useCreateUser, useIssueEnrollmentToken,
-  useDepartments, useCreateDepartment, useAssignUserDepartment,
+  useRates, useSetRate, useIssueEnrollmentToken,
+  useDepartments, useCreateDepartment,
   useEnrollmentTokens, useRevokeToken, useTemplates, useDeploymentConfig,
 } from "@/lib/queries";
-import { useAuth } from "@/lib/auth";
+import { useAuth, isAdminRole } from "@/lib/auth";
 import { DISPLAY_CURRENCY } from "@/lib/currency";
 import { Plus, Trash2, Building2 } from "lucide-react";
 import {
@@ -14,11 +14,12 @@ import {
   Input, Select, FormField, CopyButton, Tabs, toneFor, TOKEN_TONE,
 } from "@/components/ui";
 import { SecuritySessions } from "@/components/SecuritySessions";
+import { OrgMembers } from "@/components/OrgMembers";
 
-// Admin tabs gate behind the admin role; Security (own sessions) is available to everyone.
+// Admin tabs gate behind admin/owner; Security (own sessions) is available to everyone.
 const ADMIN_TABS = [
   { key: "general", label: "General" },
-  { key: "users", label: "Users" },
+  { key: "organization", label: "Organization" },
   { key: "departments", label: "Departments" },
   { key: "billing", label: "Billing" },
   { key: "templates", label: "Templates" },
@@ -28,7 +29,7 @@ const SECURITY_TAB = { key: "security", label: "Security" };
 
 function SettingsContent() {
   const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
+  const isAdmin = isAdminRole(user?.role);
   const router = useRouter();
   const search = useSearchParams();
   const TABS = isAdmin ? [...ADMIN_TABS, SECURITY_TAB] : [SECURITY_TAB];
@@ -44,12 +45,6 @@ function SettingsContent() {
   const { data: departments } = useDepartments();
   const createDept = useCreateDepartment();
   const [deptForm, setDeptForm] = useState({ name: "", description: "" });
-
-  const { data: users, isLoading: usersLoading } = useUsers();
-  const createUser = useCreateUser();
-  const assignDept = useAssignUserDepartment();
-  const [userForm, setUserForm] = useState({ email: "", name: "", role: "user", department_id: "" });
-  const [userError, setUserError] = useState("");
 
   const issueToken = useIssueEnrollmentToken();
   const { data: tokens } = useEnrollmentTokens();
@@ -67,11 +62,6 @@ function SettingsContent() {
     if (isNaN(rate) || rate <= 0) { setRateError("Enter a valid positive rate."); return; }
     try { await setRate.mutateAsync({ gpu_model: rateForm.gpu_model, rate_per_gpu_hour: rate, currency: rateForm.currency }); setRateForm({ gpu_model: "", rate_per_gpu_hour: "", currency: "USD" }); }
     catch { setRateError("Failed to save rate card."); }
-  }
-  async function handleCreateUser(e: React.FormEvent) {
-    e.preventDefault(); setUserError("");
-    try { await createUser.mutateAsync({ ...userForm, department_id: userForm.department_id || undefined }); setUserForm({ email: "", name: "", role: "user", department_id: "" }); }
-    catch { setUserError("Failed to create user. Email may already exist."); }
   }
   async function handleCreateDept(e: React.FormEvent) { e.preventDefault(); if (!deptForm.name) return; await createDept.mutateAsync(deptForm); setDeptForm({ name: "", description: "" }); }
   async function handleIssueToken() { const res = await issueToken.mutateAsync(tokenForm); setToken(res.token); }
@@ -122,43 +112,7 @@ function SettingsContent() {
         </div>
       )}
 
-      {tab === "users" && (
-        <div className="space-y-4">
-          <Card className="overflow-hidden">
-            <CardHeader title="Users" meta={`${users?.length ?? 0} members`} />
-            {usersLoading ? <div className="py-6 text-center text-sm text-ink-muted">Loading users…</div> : (
-              <Table columns={[{ key: "n", label: "Name" }, { key: "e", label: "Email" }, { key: "r", label: "Role" }, { key: "d", label: "Department" }]}>
-                {(users ?? []).map((u) => (
-                  <Row key={u.id}>
-                    <Cell className="font-medium text-ink">{u.name || "—"}</Cell>
-                    <Cell>{u.email}</Cell>
-                    <Cell><Badge tone={u.role === "admin" ? "blue" : "neutral"}>{u.role}</Badge></Cell>
-                    <Cell>
-                      <Select value={u.department_id ?? ""} onChange={(e) => assignDept.mutate({ userId: u.id, departmentId: e.target.value || null })} className="w-auto py-1 text-xs">
-                        <option value="">— none —</option>
-                        {departments?.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                      </Select>
-                    </Cell>
-                  </Row>
-                ))}
-              </Table>
-            )}
-          </Card>
-          <Card className="p-5">
-            <h3 className="mb-4 flex items-center gap-2 text-sm font-medium text-ink"><Plus size={14} /> Invite user</h3>
-            <form onSubmit={handleCreateUser}>
-              <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-                <FormField label="Email"><Input type="email" value={userForm.email} onChange={(e) => setUserForm({ ...userForm, email: e.target.value })} placeholder="jane@company.com" required /></FormField>
-                <FormField label="Name"><Input value={userForm.name} onChange={(e) => setUserForm({ ...userForm, name: e.target.value })} placeholder="Jane Smith" /></FormField>
-                <FormField label="Role"><Select value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}><option value="user">User</option><option value="admin">Admin</option></Select></FormField>
-                <FormField label="Department"><Select value={userForm.department_id} onChange={(e) => setUserForm({ ...userForm, department_id: e.target.value })}><option value="">— none —</option>{departments?.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</Select></FormField>
-              </div>
-              {userError && <p className="mt-3 text-sm text-red-400">{userError}</p>}
-              <Button type="submit" variant="primary" className="mt-4" disabled={createUser.isPending}>{createUser.isPending ? "Creating…" : "Create user"}</Button>
-            </form>
-          </Card>
-        </div>
-      )}
+      {tab === "organization" && <OrgMembers />}
 
       {tab === "departments" && (
         <div className="space-y-4">

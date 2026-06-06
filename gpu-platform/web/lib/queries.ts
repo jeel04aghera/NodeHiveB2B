@@ -305,6 +305,104 @@ export function useRevokeAllSessions() {
   });
 }
 
+// ── Organization members / invitations / join codes (Phase 3) ─────────────────
+export interface Member {
+  id: string;
+  org_id: string;
+  user_id: string;
+  email: string;
+  name: string;
+  role: "owner" | "admin" | "member";
+  avatar_url?: string;
+  invited_by?: string | null;
+  created_at: string;
+  last_login_at?: string | null;
+}
+export interface Invitation {
+  id: string;
+  org_id: string;
+  email: string;
+  role: "admin" | "member";
+  created_at: string;
+  expires_at: string;
+  status: "pending" | "accepted" | "expired" | "revoked";
+}
+export interface JoinCode {
+  id: string;
+  org_id: string;
+  description: string;
+  max_uses: number;
+  uses: number;
+  expires_at: string;
+  status: "active" | "expired" | "revoked" | "exhausted";
+  created_at: string;
+}
+
+export function useMembers() {
+  return useQuery({ queryKey: ["org", "members"], queryFn: () => api<Member[]>("/org/members") });
+}
+export function useChangeMemberRole() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ userId, role }: { userId: string; role: string }) =>
+      api<void>(`/org/members/${userId}/role`, { method: "PATCH", body: JSON.stringify({ role }) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["org", "members"] }),
+  });
+}
+export function useRemoveMember() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (userId: string) => api<void>(`/org/members/${userId}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["org", "members"] }),
+  });
+}
+
+export function useInvitations() {
+  return useQuery({ queryKey: ["org", "invitations"], queryFn: () => api<Invitation[]>("/org/invitations") });
+}
+export interface InviteResult { invitation: Invitation; token: string; accept_url: string }
+export function useCreateInvitation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { email: string; role: string }) =>
+      api<InviteResult>("/org/invitations", { method: "POST", body: JSON.stringify(body) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["org", "invitations"] }),
+  });
+}
+export function useResendInvitation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<InviteResult>(`/org/invitations/${id}/resend`, { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["org", "invitations"] }),
+  });
+}
+export function useRevokeInvitation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<void>(`/org/invitations/${id}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["org", "invitations"] }),
+  });
+}
+
+export function useJoinCodes() {
+  return useQuery({ queryKey: ["org", "join-codes"], queryFn: () => api<JoinCode[]>("/org/join-codes") });
+}
+export function useCreateJoinCode() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { description: string; ttl_days: number; max_uses: number }) =>
+      api<{ code: string }>("/org/join-codes", { method: "POST", body: JSON.stringify(body) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["org", "join-codes"] }),
+  });
+}
+export function useRevokeJoinCode() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<void>(`/org/join-codes/${id}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["org", "join-codes"] }),
+  });
+}
+
 export function useRates() {
   return useQuery({
     queryKey: ["billing", "rates"],

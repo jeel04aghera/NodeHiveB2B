@@ -96,7 +96,7 @@ func (a *API) listBudgets(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) setBudget(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}
@@ -142,7 +142,7 @@ func (a *API) deleteBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}
@@ -191,7 +191,7 @@ func (a *API) listAlertRules(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) createAlertRule(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}
@@ -228,7 +228,7 @@ func (a *API) toggleAlertRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}
@@ -252,7 +252,7 @@ func (a *API) deleteAlertRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}

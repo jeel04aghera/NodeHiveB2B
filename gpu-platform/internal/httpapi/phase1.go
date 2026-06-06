@@ -87,7 +87,7 @@ func (a *API) getTemplate(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) createTemplate(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}
@@ -140,7 +140,7 @@ func (a *API) listDepartments(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) createDepartment(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}
@@ -162,7 +162,7 @@ func (a *API) createDepartment(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) assignUserDepartment(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}
@@ -194,7 +194,7 @@ func (a *API) assignUserDepartment(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) listTokens(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}
@@ -208,7 +208,7 @@ func (a *API) listTokens(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) revokeToken(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	if u.Role != domain.RoleAdmin {
+	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
 	}

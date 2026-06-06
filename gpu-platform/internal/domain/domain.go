@@ -20,8 +20,12 @@ type (
 )
 
 const (
-	RoleAdmin Role = "admin"
-	RoleUser  Role = "user"
+	// Org roles form a hierarchy: owner > admin > member. RoleUser is the legacy value
+	// ('user') kept so old tokens/rows keep working; it ranks the same as member.
+	RoleOwner  Role = "owner"
+	RoleAdmin  Role = "admin"
+	RoleMember Role = "member"
+	RoleUser   Role = "user" // legacy alias for member
 
 	NodeOnline   NodeStatus = "online"
 	NodeOffline  NodeStatus = "offline"
@@ -47,6 +51,32 @@ const (
 	SourceWorkload UsageSource = "workload"
 	SourceIdle     UsageSource = "idle"
 )
+
+// Rank gives the role's privilege level for hierarchy comparisons (owner > admin > member).
+// Unknown roles rank 0. The legacy 'user' value ranks the same as 'member'.
+func (r Role) Rank() int {
+	switch r {
+	case RoleOwner:
+		return 3
+	case RoleAdmin:
+		return 2
+	case RoleMember, RoleUser:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// AtLeast reports whether r is at least as privileged as min (e.g. owner satisfies admin).
+func (r Role) AtLeast(min Role) bool { return r.Rank() >= min.Rank() }
+
+// Normalize collapses the legacy 'user' role to 'member'.
+func (r Role) Normalize() Role {
+	if r == RoleUser {
+		return RoleMember
+	}
+	return r
+}
 
 // OrgSettings is stored as jsonb on organizations.
 type OrgSettings struct {
@@ -113,6 +143,52 @@ type Session struct {
 	ExpiresAt    time.Time  `json:"expires_at"`
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
 	Current      bool       `json:"current"` // true for the session making the request (computed)
+}
+
+// Member is a user's membership of an organization with a role. In the single-active-org
+// model there is one membership per user (mirrors users.org_id), but the table is the
+// authoritative record of role and the groundwork for multi-org later.
+type Member struct {
+	ID          uuid.UUID  `json:"id"`
+	OrgID       uuid.UUID  `json:"org_id"`
+	UserID      uuid.UUID  `json:"user_id"`
+	Email       string     `json:"email"`
+	Name        string     `json:"name"`
+	Role        Role       `json:"role"`
+	AvatarURL   string     `json:"avatar_url,omitempty"`
+	InvitedBy   *uuid.UUID `json:"invited_by,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
+}
+
+// Invitation is a pending email invitation to join an organization with a given role.
+// The raw token is never stored — only its hash (shared with the invitee out of band).
+type Invitation struct {
+	ID         uuid.UUID  `json:"id"`
+	OrgID      uuid.UUID  `json:"org_id"`
+	Email      string     `json:"email"`
+	Role       Role       `json:"role"`
+	InvitedBy  *uuid.UUID `json:"invited_by,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	AcceptedAt *time.Time `json:"accepted_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	Status     string     `json:"status"` // pending | accepted | expired | revoked (computed)
+}
+
+// JoinCode is a shareable code that lets users self-join an org as members, bounded by
+// expiry and max uses. Only the hash is stored (shown once, like enrollment tokens).
+type JoinCode struct {
+	ID          uuid.UUID  `json:"id"`
+	OrgID       uuid.UUID  `json:"org_id"`
+	Description string     `json:"description"`
+	CreatedBy   *uuid.UUID `json:"created_by,omitempty"`
+	MaxUses     int        `json:"max_uses"` // 0 = unlimited
+	Uses        int        `json:"uses"`
+	ExpiresAt   time.Time  `json:"expires_at"`
+	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	Status      string     `json:"status"` // active | expired | revoked | exhausted (computed)
 }
 
 type Project struct {

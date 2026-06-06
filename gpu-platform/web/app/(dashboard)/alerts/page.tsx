@@ -4,7 +4,7 @@ import {
   useAlerts, useAckAlert, useAlertRules, useCreateAlertRule, useToggleAlertRule, useDeleteAlertRule,
   useProjects, useDepartments, type Alert, type AlertRule, type AlertType,
 } from "@/lib/queries";
-import { useAuth } from "@/lib/auth";
+import { useAuth, isAdminRole } from "@/lib/auth";
 import {
   PageHeader, Card, CardHeader, Table, Row, Cell, EmptyState, Button, Badge,
   Modal, FormField, Input, Select, type Tone, useToast,
@@ -99,7 +99,7 @@ function RuleModal({ onClose }: { onClose: () => void }) {
 
 export default function AlertsPage() {
   const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
+  const isAdmin = isAdminRole(user?.role);
   const { data: alerts } = useAlerts(false);
   const { data: rules } = useAlertRules();
   const ack = useAckAlert();

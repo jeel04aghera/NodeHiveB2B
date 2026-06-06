@@ -7,7 +7,7 @@ import {
   Wallet, Receipt, Users, Building2, ScrollText, Settings, LogOut, FlaskConical, Zap,
   ListOrdered, CalendarClock, Target, BellRing,
 } from "lucide-react";
-import { useAuth } from "@/lib/auth";
+import { useAuth, roleLabel } from "@/lib/auth";
 import { useDeploymentConfig, useAlerts } from "@/lib/queries";
 import { useOrgProfile } from "@/lib/org";
 import { cn } from "@/components/ui";
@@ -136,7 +136,7 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
             </div>
             <div className="min-w-0 flex-1">
               <div className="truncate text-xs font-medium text-ink">{user.name || user.email}</div>
-              <div className="text-[11px] text-ink-subtle">{user.role === "admin" ? "Administrator" : "Member"}</div>
+              <div className="text-[11px] text-ink-subtle">{roleLabel(user.role)}</div>
             </div>
             <button
               onClick={() => { logout(); router.replace("/login"); }}

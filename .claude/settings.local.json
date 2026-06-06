@@ -193,7 +193,8 @@
       "Bash(cat memory/MEMORY.md)",
       "Bash(cat /Users/jeelaghera/.claude/projects/-Users-jeelaghera-Downloads-Koala/memory/project_nodehive.md)",
       "Read(//Applications/Docker.app/**)",
-      "Bash(colima status *)"
+      "Bash(colima status *)",
+      "Bash(perl -0pi -e 's/u\\\\.Role != domain\\\\.RoleAdmin/!u.Role.AtLeast\\(domain.RoleAdmin\\)/g' internal/httpapi/ops.go internal/httpapi/phase1.go internal/httpapi/router.go)"
     ]
   }
 }

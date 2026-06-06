@@ -22,11 +22,26 @@ interface AuthCtx {
   loginWithToken: (token: string) => Promise<CurrentUser>;
   // createOrg provisions an org for a pre-onboarding user and adopts the new session.
   createOrg: (orgName: string) => Promise<CurrentUser>;
+  // registerPending creates an account with NO org (for invite/join-code signups).
+  registerPending: (input: { email: string; name: string; password: string }) => Promise<void>;
+  // acceptInvitation / joinWithCode attach a pre-onboarding user to an existing org.
+  acceptInvitation: (token: string) => Promise<CurrentUser>;
+  joinWithCode: (code: string) => Promise<CurrentUser>;
   logout: () => void;
 }
 
 const Ctx = createContext<AuthCtx | null>(null);
 const KEY = "nh_token";
+
+// Org roles are hierarchical: owner > admin > member. Admin-gated UI should treat owners
+// as admins too.
+export function isAdminRole(role?: string): boolean {
+  return role === "admin" || role === "owner";
+}
+export function roleLabel(role?: string): string {
+  if (!role) return "Member";
+  return role.charAt(0).toUpperCase() + role.slice(1);
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<CurrentUser | null>(null);
@@ -111,6 +126,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return r.user;
   }
 
+  async function registerPending(input: { email: string; name: string; password: string }) {
+    const r = await api<{ token: string; user: CurrentUser }>("/auth/register-pending", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    localStorage.setItem(KEY, r.token);
+    setToken(r.token);
+    setUser(r.user);
+  }
+
+  async function acceptInvitation(token: string): Promise<CurrentUser> {
+    const r = await api<{ token: string; user: CurrentUser }>("/onboarding/accept-invitation", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+    localStorage.setItem(KEY, r.token);
+    setToken(r.token);
+    setUser(r.user);
+    return r.user;
+  }
+
+  async function joinWithCode(code: string): Promise<CurrentUser> {
+    const r = await api<{ token: string; user: CurrentUser }>("/onboarding/join-code", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    });
+    localStorage.setItem(KEY, r.token);
+    setToken(r.token);
+    setUser(r.user);
+    return r.user;
+  }
+
   function logout() {
     // Revoke the server-side session + clear the refresh cookie (best-effort), then drop
     // local state regardless of the network result.
@@ -121,7 +168,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <Ctx.Provider value={{ user, ready, login, register, loginWithToken, createOrg, logout }}>
+    <Ctx.Provider value={{ user, ready, login, register, loginWithToken, createOrg, registerPending, acceptInvitation, joinWithCode, logout }}>
       {children}
     </Ctx.Provider>
   );

@@ -137,10 +137,13 @@ func (s *ServiceImpl) Register(ctx context.Context, orgName, email, name, passwo
 	var u domain.User
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO users (org_id, email, password_hash, name, role, auth_provider, email_verified)
-		 VALUES ($1, $2, $3, $4, 'admin', 'password', false)
+		 VALUES ($1, $2, $3, $4, 'owner', 'password', false)
 		 RETURNING id, org_id, email, name, role, status`,
 		orgID, email, string(hash), name).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.Status); err != nil {
 		return "", domain.User{}, fmt.Errorf("create admin: %w", err)
+	}
+	if err := insertMembershipTx(ctx, tx, orgID, u.ID, domain.RoleOwner, nil); err != nil {
+		return "", domain.User{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -234,7 +237,7 @@ func (s *ServiceImpl) UpsertGoogleUser(ctx context.Context, sub, email, name, av
 	var u domain.User
 	err := s.db.QueryRow(ctx,
 		`INSERT INTO users (org_id, email, password_hash, name, role, google_sub, avatar_url, email_verified, auth_provider)
-		 VALUES (NULL, $1, NULL, $2, 'user', $3, $4, true, 'google')
+		 VALUES (NULL, $1, NULL, $2, 'member', $3, $4, true, 'google')
 		 RETURNING id, email, name, role, status`,
 		email, name, sub, avatar).Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.Status)
 	if err != nil {
@@ -276,16 +279,33 @@ func (s *ServiceImpl) CreateOrgForUser(ctx context.Context, userID uuid.UUID, or
 	}
 	var u domain.User
 	if err := tx.QueryRow(ctx,
-		`UPDATE users SET org_id=$2, role='admin' WHERE id=$1
+		`UPDATE users SET org_id=$2, role='owner' WHERE id=$1
 		 RETURNING id, org_id, department_id, email, name, role, status`,
 		userID, orgID).Scan(&u.ID, &u.OrgID, &u.DepartmentID, &u.Email, &u.Name, &u.Role, &u.Status); err != nil {
 		return "", domain.User{}, fmt.Errorf("attach org: %w", err)
+	}
+	if err := insertMembershipTx(ctx, tx, orgID, u.ID, domain.RoleOwner, nil); err != nil {
+		return "", domain.User{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", domain.User{}, err
 	}
 	tok, err := s.issueJWT(u)
 	return tok, u, err
+}
+
+// insertMembershipTx upserts an organization_members row inside a transaction. Used by the
+// org-creation/join paths so memberships stay consistent with users going forward.
+func insertMembershipTx(ctx context.Context, tx pgx.Tx, orgID, userID uuid.UUID, role domain.Role, invitedBy *uuid.UUID) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO organization_members (org_id, user_id, role, invited_by)
+		 VALUES ($1,$2,$3,$4)
+		 ON CONFLICT (org_id, user_id) DO UPDATE SET role=EXCLUDED.role`,
+		orgID, userID, string(role.Normalize()), invitedBy)
+	if err != nil {
+		return fmt.Errorf("create membership: %w", err)
+	}
+	return nil
 }
 
 // userByGoogleSub / userByEmail are small scoped lookups used by UpsertGoogleUser.
@@ -369,19 +389,31 @@ func (s *ServiceImpl) Authenticate(ctx context.Context, token string) (domain.Us
 }
 
 func (s *ServiceImpl) CreateUser(ctx context.Context, orgID uuid.UUID, email, name string, role domain.Role) (domain.User, error) {
+	role = role.Normalize()
 	tempPw := randomToken()
 	hash, err := bcrypt.GenerateFromPassword([]byte(tempPw), bcrypt.DefaultCost)
 	if err != nil {
 		return domain.User{}, err
 	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return domain.User{}, err
+	}
+	defer tx.Rollback(ctx)
 	var u domain.User
-	err = s.db.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO users (org_id, email, password_hash, name, role)
 		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, org_id, email, name, role, status`,
-		orgID, email, string(hash), name, role).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.Status)
+		orgID, email, string(hash), name, string(role)).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.Status)
 	if err != nil {
 		return domain.User{}, fmt.Errorf("create user: %w", err)
+	}
+	if err := insertMembershipTx(ctx, tx, orgID, u.ID, role, nil); err != nil {
+		return domain.User{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.User{}, err
 	}
 	return u, nil
 }
@@ -511,11 +543,23 @@ func (s *ServiceImpl) BootstrapAdmin(ctx context.Context, spec string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(ctx,
+	var userID uuid.UUID
+	err = s.db.QueryRow(ctx,
 		`INSERT INTO users (org_id, email, password_hash, name, role)
-		 VALUES ($1, $2, $3, 'Admin', 'admin')
-		 ON CONFLICT (org_id, email) DO NOTHING`,
-		orgID, email, string(hash))
+		 VALUES ($1, $2, $3, 'Admin', 'owner')
+		 ON CONFLICT (org_id, email) DO NOTHING
+		 RETURNING id`,
+		orgID, email, string(hash)).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // already existed (conflict) — nothing to bootstrap
+	}
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(ctx,
+		`INSERT INTO organization_members (org_id, user_id, role)
+		 VALUES ($1,$2,'owner') ON CONFLICT (org_id, user_id) DO NOTHING`,
+		orgID, userID)
 	return err
 }
 
@@ -545,4 +589,9 @@ func randomToken() string {
 func hashToken(t string) string {
 	sum := sha256.Sum256([]byte(t))
 	return hex.EncodeToString(sum[:])
+}
+
+func bcryptHash(password string) (string, error) {
+	h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(h), err
 }

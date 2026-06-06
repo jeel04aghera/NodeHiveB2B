@@ -124,8 +124,8 @@ func TestOnboardingAttachesOrg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create org: %v", err)
 	}
-	if !onb.Onboarded() || onb.Role != "admin" {
-		t.Errorf("after onboarding expected admin with org, got role=%q org=%v", onb.Role, onb.OrgID)
+	if !onb.Onboarded() || onb.Role != "owner" {
+		t.Errorf("after onboarding expected owner with org, got role=%q org=%v", onb.Role, onb.OrgID)
 	}
 	// Org was fully provisioned (rate cards + welcome credit), like Register.
 	var rateCards, credits int

@@ -4,7 +4,7 @@ import {
   useBudgets, useSetBudget, useDeleteBudget, useDepartments, useProjects,
   type Budget,
 } from "@/lib/queries";
-import { useAuth } from "@/lib/auth";
+import { useAuth, isAdminRole } from "@/lib/auth";
 import {
   PageHeader, Card, Table, Row, Cell, EmptyState, Button, Badge, Modal, Meter,
   FormField, Input, Select, toneFor, type Tone, useToast,
@@ -93,7 +93,7 @@ function SetModal({ onClose }: { onClose: () => void }) {
 
 export default function BudgetsPage() {
   const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
+  const isAdmin = isAdminRole(user?.role);
   const { data, isLoading } = useBudgets();
   const del = useDeleteBudget();
   const [showSet, setShowSet] = useState(false);
