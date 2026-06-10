@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -28,10 +27,10 @@ func (a *API) config(w http.ResponseWriter, r *http.Request) {
 	}
 	devMode := synthetic > 0
 	writeJSON(w, 200, map[string]any{
-		"dev_mode":           devMode,
+		"dev_mode":            devMode,
 		"synthetic_gpu_count": synthetic,
-		"total_gpu_count":    total,
-		"disclaimer":         "Synthetic GPUs are simulated for development. Metrics are generated, not measured. Not production hardware.",
+		"total_gpu_count":     total,
+		"disclaimer":          "Synthetic GPUs are simulated for development. Metrics are generated, not measured. Not production hardware.",
 	})
 }
 
@@ -123,6 +122,8 @@ func (a *API) createTemplate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not create template")
 		return
 	}
+	a.userEvent(r, u, "template.create", "template", t.ID.String(),
+		map[string]any{"name": t.Name, "base_image": t.BaseImage})
 	writeJSON(w, 201, templateResponse(t))
 }
 
@@ -157,6 +158,8 @@ func (a *API) createDepartment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not create department")
 		return
 	}
+	a.userEvent(r, u, "department.create", "department", d.ID.String(),
+		map[string]any{"name": body.Name})
 	writeJSON(w, 201, d)
 }
 
@@ -187,6 +190,11 @@ func (a *API) assignUserDepartment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not assign department")
 		return
 	}
+	meta := map[string]any{}
+	if dept != nil {
+		meta["department_id"] = dept.String()
+	}
+	a.userEvent(r, u, "user.assign_department", "user", uid.String(), meta)
 	w.WriteHeader(204)
 }
 
@@ -220,12 +228,7 @@ func (a *API) revokeToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "not_found", err.Error())
 		return
 	}
-	go func() {
-		_ = a.audit.Record(context.Background(), domain.AuditLog{
-			OrgID: u.OrgID, ActorType: "user", ActorID: u.ID.String(),
-			Action: "enrollment_token.revoke", TargetType: "enrollment_token", TargetID: id.String(),
-		})
-	}()
+	a.userEvent(r, u, "enrollment_token.revoke", "enrollment_token", id.String(), nil)
 	w.WriteHeader(204)
 }
 

@@ -13,14 +13,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"google.golang.org/protobuf/types/known/wrapperspb"
+	"google.golang.org/protobuf/proto"
 
 	agentv1 "github.com/nodehive/gpu-platform/gen/go/agent/v1"
 	workloadv1 "github.com/nodehive/gpu-platform/gen/go/workload/v1"
+	"github.com/nodehive/gpu-platform/internal/commands"
 	"github.com/nodehive/gpu-platform/internal/domain"
 )
-
-var _ = wrapperspb.String // suppress unused import if needed
 
 var ErrNotFound = errors.New("workload not found")
 var ErrNoGPUsAvailable = errors.New("no GPUs available matching request")
@@ -92,10 +91,37 @@ type ServiceImpl struct {
 	db       *pgxpool.Pool
 	dispatch Dispatcher
 	billing  Biller
+	auditRec func(ctx context.Context, e domain.AuditLog) // optional, fire-and-forget
 }
 
-func NewService(db *pgxpool.Pool, dispatch Dispatcher, billing Biller) Service {
-	return &ServiceImpl{db: db, dispatch: dispatch, billing: billing}
+// Option configures optional service features without breaking existing callers.
+type Option func(*ServiceImpl)
+
+// WithAudit records system/agent-driven workload lifecycle transitions (sweep
+// reclaims, idle stops, agent-reported failures) in the audit trail. User-initiated
+// launch/stop are audited at the HTTP layer where the actor is known.
+func WithAudit(rec func(ctx context.Context, e domain.AuditLog)) Option {
+	return func(s *ServiceImpl) { s.auditRec = rec }
+}
+
+func NewService(db *pgxpool.Pool, dispatch Dispatcher, billing Biller, opts ...Option) Service {
+	s := &ServiceImpl{db: db, dispatch: dispatch, billing: billing}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// auditSystem emits a system-actor audit event when an auditor is wired.
+func (s *ServiceImpl) auditSystem(ctx context.Context, orgID uuid.UUID, actorType, action string, workloadID uuid.UUID, meta map[string]any) {
+	if s.auditRec == nil {
+		return
+	}
+	s.auditRec(ctx, domain.AuditLog{
+		OrgID: orgID, ActorType: actorType,
+		Action: action, TargetType: "workload", TargetID: workloadID.String(),
+		Metadata: meta,
+	})
 }
 
 func (s *ServiceImpl) Launch(ctx context.Context, orgID uuid.UUID, req LaunchRequest) (domain.Workload, error) {
@@ -145,13 +171,27 @@ func (s *ServiceImpl) Launch(ctx context.Context, orgID uuid.UUID, req LaunchReq
 		CreatedAt:         time.Now(),
 	}
 
-	gpuIDs, nodeID, err := s.place(ctx, orgID, req.GPUType, req.GPUCount)
+	// Placement, workload insert, GPU claim and the launch command are ONE
+	// transaction: either the workload exists with its GPUs held and a durable
+	// command to deliver, or nothing happened. The GPU rows are locked
+	// (FOR UPDATE SKIP LOCKED) for the duration, so a concurrent launch or queue
+	// promotion can never claim the same GPUs.
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return domain.Workload{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	placed, err := s.placeAndAttach(ctx, tx, orgID, id, req.GPUType, req.GPUCount)
 	if errors.Is(err, ErrNoGPUsAvailable) {
 		// F3: no capacity → queue instead of failing.
 		wl.Status = domain.WorkloadQueued
 		now := time.Now()
-		if err := s.createWorkload(ctx, wl, nil, "queued", gpuType, &now); err != nil {
+		if err := s.insertWorkload(ctx, tx, wl, "queued", gpuType, &now); err != nil {
 			return domain.Workload{}, fmt.Errorf("create workload: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return domain.Workload{}, err
 		}
 		_ = s.recordEvent(ctx, id, orgID, "queued", "no matching GPU capacity — queued")
 		return wl, nil
@@ -160,39 +200,67 @@ func (s *ServiceImpl) Launch(ctx context.Context, orgID uuid.UUID, req LaunchReq
 		return domain.Workload{}, err
 	}
 
-	wl.NodeID = &nodeID
+	wl.NodeID = &placed.nodeID
 	wl.Status = domain.WorkloadPending
-	if err := s.createWorkload(ctx, wl, gpuIDs, "preparing", gpuType, nil); err != nil {
+	if err := s.insertWorkload(ctx, tx, wl, "preparing", gpuType, nil); err != nil {
 		return domain.Workload{}, fmt.Errorf("create workload: %w", err)
 	}
-	for _, gid := range gpuIDs {
-		_, _ = s.db.Exec(ctx, `UPDATE gpus SET status='in_use' WHERE id=$1`, gid)
+	if err := placed.attach(ctx, tx); err != nil {
+		return domain.Workload{}, fmt.Errorf("attach gpus: %w", err)
 	}
+	if err := s.enqueueLaunch(ctx, tx, wl, placed); err != nil {
+		return domain.Workload{}, fmt.Errorf("enqueue launch: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Workload{}, err
+	}
+
 	_ = s.recordEvent(ctx, id, orgID, "scheduling", "")
 	_ = s.recordEvent(ctx, id, orgID, "node_selected", "")
 	_ = s.recordEvent(ctx, id, orgID, "preparing", "")
-
-	go s.sendLaunchCommand(context.Background(), nodeID, wl, gpuIDs)
+	s.dispatch.Nudge(placed.nodeID)
 	return wl, nil
 }
 
 func (s *ServiceImpl) Stop(ctx context.Context, id uuid.UUID, reason domain.StopReason) error {
-	var nodeID uuid.UUID
-	err := s.db.QueryRow(ctx,
+	// The status flip and the stop command are one transaction (outbox): once the
+	// workload reads 'stopping', a durable command exists and will be (re)delivered
+	// until the agent acks it or the sweep declares the workload failed.
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var nodeID *uuid.UUID
+	var orgID uuid.UUID
+	err = tx.QueryRow(ctx,
 		`UPDATE workloads SET status='stopping', stop_reason=$2, stopping_at=now()
 		 WHERE id=$1 AND status IN ('pending','running')
-		 RETURNING node_id`, id, reason).Scan(&nodeID)
+		 RETURNING node_id, org_id`, id, reason).Scan(&nodeID, &orgID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
-	var orgID uuid.UUID
-	_ = s.db.QueryRow(ctx, `SELECT org_id FROM workloads WHERE id=$1`, id).Scan(&orgID)
+	if nodeID != nil {
+		if err := s.enqueueStop(ctx, tx, orgID, *nodeID, id, reason); err != nil {
+			return fmt.Errorf("enqueue stop: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
 	_ = s.recordEvent(ctx, id, orgID, "stopping", "")
-	if nodeID != uuid.Nil {
-		go s.sendStopCommand(context.Background(), nodeID, id, reason)
+	// User/admin stops are audited at the HTTP layer (with actor + IP); system
+	// reclaims (idle timeout, failure cleanup) are only visible here.
+	if reason != domain.StopUser && reason != domain.StopAdmin {
+		s.auditSystem(ctx, orgID, "system", "workload.stop", id,
+			map[string]any{"reason": string(reason)})
+	}
+	if nodeID != nil {
+		s.dispatch.Nudge(*nodeID)
 	}
 	return nil
 }
@@ -266,8 +334,72 @@ func (s *ServiceImpl) SweepStuck(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
+	// Case 3 (delivery guarantee): a launch command that could not be handed to the
+	// agent before its deliver_by deadline becomes an EXPLICIT failure — the
+	// workload is failed and its GPUs freed, instead of sitting in 'pending' forever
+	// on a node that looks online but never received the command.
+	expired, err := commands.ExpireOverdue(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	for _, e := range expired {
+		if e.Kind != commands.KindLaunch || e.WorkloadID == nil {
+			continue
+		}
+		ct, err := tx.Exec(ctx,
+			`UPDATE workloads SET status='failed', stopped_at=$2, stage='failed',
+			        stop_reason=COALESCE(stop_reason,'failure'),
+			        logs=COALESCE(NULLIF(logs,''),'launch command could not be delivered to the agent (node unreachable)')
+			 WHERE id=$1 AND status='pending'`, *e.WorkloadID, now)
+		if err != nil {
+			return 0, err
+		}
+		if ct.RowsAffected() > 0 {
+			if _, err := tx.Exec(ctx,
+				`UPDATE workload_gpus SET detached_at=$2 WHERE workload_id=$1 AND detached_at IS NULL`,
+				*e.WorkloadID, now); err != nil {
+				return 0, err
+			}
+			stuck = append(stuck, *e.WorkloadID)
+		}
+	}
+
+	// Case 4: commands whose workload already reached a terminal state by another
+	// path no longer matter — stop retrying them.
+	if _, err := commands.SupersedeForTerminalWorkloads(ctx, tx); err != nil {
+		return 0, err
+	}
+
+	// Re-run the GPU free for workloads failed in case 3.
+	if _, err := tx.Exec(ctx,
+		`UPDATE gpus SET status='idle'
+		  WHERE status='in_use'
+		    AND id NOT IN (
+		      SELECT wg.gpu_id FROM workload_gpus wg
+		        JOIN workloads w ON w.id = wg.workload_id
+		       WHERE wg.detached_at IS NULL
+		         AND w.status IN ('pending','running','stopping')
+		    )`); err != nil {
+		return 0, err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
+	}
+	// Audit the reclaims (post-commit; the sweep result is already durable).
+	if s.auditRec != nil && len(stuck) > 0 {
+		rows, err := s.db.Query(ctx,
+			`SELECT id, org_id FROM workloads WHERE id = ANY($1)`, stuck)
+		if err == nil {
+			for rows.Next() {
+				var wid, oid uuid.UUID
+				if rows.Scan(&wid, &oid) == nil {
+					s.auditSystem(ctx, oid, "system", "workload.failed", wid,
+						map[string]any{"reason": "sweep_reclaim"})
+				}
+			}
+			rows.Close()
+		}
 	}
 	return len(stuck), nil
 }
@@ -298,15 +430,25 @@ func (s *ServiceImpl) Get(ctx context.Context, orgID, id uuid.UUID) (domain.Work
 // (system-initiated paths: queue promotion, sweeps) — never reachable from a user
 // request. All request-facing reads MUST go through the org-scoped Get above.
 func (s *ServiceImpl) getByID(ctx context.Context, id uuid.UUID) (domain.Workload, error) {
+	return scanWorkloadRow(s.db.QueryRow(ctx,
+		`SELECT `+workloadCols+` FROM workloads WHERE id=$1`, id))
+}
+
+// getByIDTx is getByID inside the caller's transaction (queue promotion reads the
+// row it just CAS'd to build the launch command).
+func (s *ServiceImpl) getByIDTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) (domain.Workload, error) {
+	return scanWorkloadRow(tx.QueryRow(ctx,
+		`SELECT `+workloadCols+` FROM workloads WHERE id=$1`, id))
+}
+
+func scanWorkloadRow(row pgx.Row) (domain.Workload, error) {
 	var w domain.Workload
-	err := s.db.QueryRow(ctx,
-		`SELECT `+workloadCols+` FROM workloads WHERE id=$1`, id).
-		Scan(&w.ID, &w.OrgID, &w.ProjectID, &w.DepartmentID, &w.TemplateID, &w.UserID, &w.NodeID,
-			&w.Name, &w.Image, &w.ContainerID,
-			&w.RequestedGPUCount, &w.Status, &w.IdleTimeoutSec,
-			&w.ExposeSSH, &w.ExposeJupyter, &w.SSHPassword,
-			&w.SSHEndpoint, &w.JupyterEndpoint, &w.Logs,
-			&w.StartedAt, &w.StoppedAt, &w.StopReason, &w.CreatedAt, &w.Stage)
+	err := row.Scan(&w.ID, &w.OrgID, &w.ProjectID, &w.DepartmentID, &w.TemplateID, &w.UserID, &w.NodeID,
+		&w.Name, &w.Image, &w.ContainerID,
+		&w.RequestedGPUCount, &w.Status, &w.IdleTimeoutSec,
+		&w.ExposeSSH, &w.ExposeJupyter, &w.SSHPassword,
+		&w.SSHEndpoint, &w.JupyterEndpoint, &w.Logs,
+		&w.StartedAt, &w.StoppedAt, &w.StopReason, &w.CreatedAt, &w.Stage)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Workload{}, ErrNotFound
 	}
@@ -445,22 +587,37 @@ func (s *ServiceImpl) UpdateStatus(ctx context.Context, nodeID, id uuid.UUID, st
 	switch state {
 	case domain.WorkloadRunning:
 		var orgID uuid.UUID
-		_ = s.db.QueryRow(ctx, `SELECT org_id FROM workloads WHERE id=$1`, id).Scan(&orgID)
-		_, err := s.db.Exec(ctx,
+		var cur string
+		_ = s.db.QueryRow(ctx, `SELECT org_id, status FROM workloads WHERE id=$1`, id).Scan(&orgID, &cur)
+		// A 'running' report may only land on pending/running workloads. It must
+		// never resurrect a terminal row (a late or reconcile-time report for a
+		// workload the sweep already failed) and must not undo an in-flight stop.
+		ct, err := s.db.Exec(ctx,
 			`UPDATE workloads SET status=$2, ssh_endpoint=$3, jupyter_endpoint=$4,
 			        started_at=COALESCE(started_at,$5), logs=COALESCE(NULLIF($6,''),logs)
-			 WHERE id=$1`,
+			 WHERE id=$1 AND status IN ('pending','running')`,
 			id, state, ssh, jupyter, now, logs)
-		if err == nil {
-			if ssh != "" {
-				_ = s.recordEvent(ctx, id, orgID, "ssh_enabled", ssh)
-			}
-			if jupyter != "" {
-				_ = s.recordEvent(ctx, id, orgID, "jupyter_enabled", jupyter)
-			}
-			_ = s.recordEvent(ctx, id, orgID, "ready", "workload running")
+		if err != nil {
+			return err
 		}
-		return err
+		if ct.RowsAffected() == 0 {
+			// Terminal on our side but running on the node: the container leaked
+			// (e.g. reclaimed during an agent outage). Tell the agent to stop it.
+			if cur == string(domain.WorkloadStopped) || cur == string(domain.WorkloadFailed) {
+				if err := s.enqueueStop(ctx, s.db, orgID, nodeID, id, domain.StopFailure); err == nil {
+					s.dispatch.Nudge(nodeID)
+				}
+			}
+			return nil
+		}
+		if ssh != "" {
+			_ = s.recordEvent(ctx, id, orgID, "ssh_enabled", ssh)
+		}
+		if jupyter != "" {
+			_ = s.recordEvent(ctx, id, orgID, "jupyter_enabled", jupyter)
+		}
+		_ = s.recordEvent(ctx, id, orgID, "ready", "workload running")
+		return nil
 
 	case domain.WorkloadStopped, domain.WorkloadFailed:
 		var startedAt *time.Time
@@ -484,10 +641,16 @@ func (s *ServiceImpl) UpdateStatus(ctx context.Context, nodeID, id uuid.UUID, st
 			return err
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
-		if _, err := tx.Exec(ctx,
+		// Idempotent: a duplicate terminal report (redelivered stop, reconcile after
+		// reconnect) must not re-stamp stopped_at, re-meter, or re-promote.
+		ct, err := tx.Exec(ctx,
 			`UPDATE workloads SET status=$2, stopped_at=$3, logs=COALESCE(NULLIF($4,''),logs)
-			 WHERE id=$1`, id, state, now, logs); err != nil {
+			 WHERE id=$1 AND status NOT IN ('stopped','failed')`, id, state, now, logs)
+		if err != nil {
 			return err
+		}
+		if ct.RowsAffected() == 0 {
+			return nil
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE workload_gpus SET detached_at=$2 WHERE workload_id=$1 AND detached_at IS NULL`,
@@ -508,7 +671,10 @@ func (s *ServiceImpl) UpdateStatus(ctx context.Context, nodeID, id uuid.UUID, st
 			stageName = "failed"
 		}
 		_ = s.recordEvent(ctx, id, orgID, stageName, "")
-		go s.tryPromoteQueue(context.Background(), orgID)
+		s.auditSystem(ctx, orgID, "agent", "workload."+stageName, id, nil)
+		// Low-latency promotion nudge; the periodic queue sweep is the reliable
+		// fallback if this goroutine is lost to a restart.
+		go func() { _, _ = s.PromoteQueued(context.Background(), orgID) }()
 		// Final settlement: bill the remaining unmetered slice. Async but recoverable —
 		// the metering sweep settles terminal workloads whose watermark lags stopped_at,
 		// so a crash here loses nothing (Billing P0: survives control-plane restarts).
@@ -527,7 +693,31 @@ func (s *ServiceImpl) UpdateStatus(ctx context.Context, nodeID, id uuid.UUID, st
 
 // ── Placement ──────────────────────────────────────────────────────────────────
 
-func (s *ServiceImpl) place(ctx context.Context, orgID uuid.UUID, gpuType string, count int) ([]uuid.UUID, uuid.UUID, error) {
+// placement is a claimed-but-not-yet-attached GPU set. The rows are locked by the
+// caller's transaction; attach() materializes the claim (workload_gpus + in_use)
+// after the workload row exists.
+type placement struct {
+	workloadID uuid.UUID
+	nodeID     uuid.UUID
+	gpuIDs     []uuid.UUID
+	gpuUUIDs   []string
+}
+
+// placeAndAttach finds count idle GPUs on a single online node and locks exactly
+// those rows for the duration of tx. Two phases:
+//
+//  1. An UNLOCKED candidate scan groups idle GPUs by node (first-fit order).
+//  2. Per candidate node, the needed rows are claimed with FOR UPDATE SKIP LOCKED
+//     + a re-check of status='idle'. Rows locked by a concurrent placement are
+//     skipped, and getting back fewer than count means we lost the race on this
+//     node — move to the next candidate.
+//
+// Locking only the claimed rows matters: locking the whole candidate scan would
+// make every concurrent launch see "no capacity" while a single transaction holds
+// the org's idle GPUs (verified by TestPlacementConcurrencyStress). The partial
+// unique index on workload_gpus (one active attachment per GPU) backstops the
+// invariant at the schema level.
+func (s *ServiceImpl) placeAndAttach(ctx context.Context, tx pgx.Tx, orgID, workloadID uuid.UUID, gpuType string, count int) (*placement, error) {
 	q := `SELECT g.id, g.node_id FROM gpus g
 	       JOIN gpu_nodes n ON n.id = g.node_id
 	      WHERE g.org_id=$1 AND g.status='idle' AND n.status='online'`
@@ -536,43 +726,94 @@ func (s *ServiceImpl) place(ctx context.Context, orgID uuid.UUID, gpuType string
 		q += " AND g.model ILIKE $2"
 		args = append(args, "%"+gpuType+"%")
 	}
-	q += " ORDER BY g.node_id, g.gpu_index LIMIT $" + fmt.Sprintf("%d", len(args)+1)
-	args = append(args, count*10)
-	rows, err := s.db.Query(ctx, q, args...)
+	q += " ORDER BY g.node_id, g.gpu_index"
+	rows, err := tx.Query(ctx, q, args...)
 	if err != nil {
-		return nil, uuid.Nil, err
+		return nil, err
 	}
-	defer rows.Close()
-
-	type entry struct{ gpuID, nodeID uuid.UUID }
 	byNode := map[uuid.UUID][]uuid.UUID{}
 	var nodeOrder []uuid.UUID
 	for rows.Next() {
-		var e entry
-		if err := rows.Scan(&e.gpuID, &e.nodeID); err != nil {
-			return nil, uuid.Nil, err
+		var gpuID, nodeID uuid.UUID
+		if err := rows.Scan(&gpuID, &nodeID); err != nil {
+			rows.Close()
+			return nil, err
 		}
-		if _, seen := byNode[e.nodeID]; !seen {
-			nodeOrder = append(nodeOrder, e.nodeID)
+		if _, seen := byNode[nodeID]; !seen {
+			nodeOrder = append(nodeOrder, nodeID)
 		}
-		byNode[e.nodeID] = append(byNode[e.nodeID], e.gpuID)
+		byNode[nodeID] = append(byNode[nodeID], gpuID)
 	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	for _, nid := range nodeOrder {
-		if len(byNode[nid]) >= count {
-			return byNode[nid][:count], nid, nil
+		if len(byNode[nid]) < count {
+			continue
+		}
+		claimed, err := tx.Query(ctx,
+			`SELECT id, uuid FROM gpus
+			  WHERE id = ANY($1) AND status='idle'
+			  ORDER BY gpu_index
+			  LIMIT $2
+			  FOR UPDATE SKIP LOCKED`, byNode[nid], count)
+		if err != nil {
+			return nil, err
+		}
+		p := &placement{workloadID: workloadID, nodeID: nid}
+		for claimed.Next() {
+			var gid uuid.UUID
+			var guuid string
+			if err := claimed.Scan(&gid, &guuid); err != nil {
+				claimed.Close()
+				return nil, err
+			}
+			p.gpuIDs = append(p.gpuIDs, gid)
+			p.gpuUUIDs = append(p.gpuUUIDs, guuid)
+		}
+		claimed.Close()
+		if err := claimed.Err(); err != nil {
+			return nil, err
+		}
+		if len(p.gpuIDs) == count {
+			return p, nil
+		}
+		// Lost the race for this node (rows locked or no longer idle); the few
+		// rows we did lock stay locked until tx end, which is fine — placement
+		// transactions are short. Try the next node.
+	}
+	return nil, ErrNoGPUsAvailable
+}
+
+// attach records the GPU assignment under the locks placeAndAttach took: the
+// workload_gpus rows (guarded by idx_workload_gpus_one_active) and the in_use flip
+// happen in the SAME transaction as the workload row — no post-commit window where
+// a GPU is assigned but still reads idle.
+func (p *placement) attach(ctx context.Context, tx pgx.Tx) error {
+	for _, gid := range p.gpuIDs {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO workload_gpus (workload_id, gpu_id) VALUES ($1,$2)`, p.workloadID, gid); err != nil {
+			return err
 		}
 	}
-	return nil, uuid.Nil, ErrNoGPUsAvailable
+	ct, err := tx.Exec(ctx,
+		`UPDATE gpus SET status='in_use' WHERE id = ANY($1) AND status='idle'`, p.gpuIDs)
+	if err != nil {
+		return err
+	}
+	if int(ct.RowsAffected()) != len(p.gpuIDs) {
+		// Unreachable while the rows are locked; kept as a hard guard so a future
+		// regression aborts the transaction instead of double-assigning.
+		return fmt.Errorf("gpu claim raced: claimed %d of %d", ct.RowsAffected(), len(p.gpuIDs))
+	}
+	return nil
 }
 
 // ── Persistence ─────────────────────────────────────────────────────────────
 
-func (s *ServiceImpl) createWorkload(ctx context.Context, w domain.Workload, gpuIDs []uuid.UUID, stage, gpuType string, queuedAt *time.Time) error {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+func (s *ServiceImpl) insertWorkload(ctx context.Context, tx pgx.Tx, w domain.Workload, stage, gpuType string, queuedAt *time.Time) error {
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO workloads
 		   (id, org_id, project_id, department_id, template_id, user_id, node_id, name, image, container_id,
@@ -586,50 +827,36 @@ func (s *ServiceImpl) createWorkload(ctx context.Context, w domain.Workload, gpu
 		stage, gpuType, queuedAt); err != nil {
 		return err
 	}
-	for _, gid := range gpuIDs {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO workload_gpus (workload_id, gpu_id) VALUES ($1,$2)`, w.ID, gid); err != nil {
-			return err
-		}
-	}
-	return tx.Commit(ctx)
+	return nil
 }
 
-// ── Dispatch — builds real proto messages (fixes the silent-drop bug) ─────────
+// ── Command outbox — durable launch/stop, delivered by the agent gateway ──────
 
-func (s *ServiceImpl) sendLaunchCommand(ctx context.Context, nodeID uuid.UUID, w domain.Workload, gpuIDs []uuid.UUID) {
-	// Resolve GPU DB IDs → GPU UUIDs for the agent
-	rows, err := s.db.Query(ctx, `SELECT uuid FROM gpus WHERE id = ANY($1)`, gpuIDs)
-	if err != nil {
-		return
-	}
-	var gpuUUIDs []string
-	for rows.Next() {
-		var u string
-		_ = rows.Scan(&u)
-		gpuUUIDs = append(gpuUUIDs, u)
-	}
-	rows.Close()
+// launchDeliveryDeadline bounds how long a launch command may sit undelivered
+// (agent unreachable) before the sweep converts it into an explicit workload
+// failure. Note this is a DELIVERY deadline: once the agent acks, long image pulls
+// can take as long as they take.
+const launchDeliveryDeadline = 10 * time.Minute
 
+func (s *ServiceImpl) enqueueLaunch(ctx context.Context, tx pgx.Tx, w domain.Workload, p *placement) error {
 	idleTimeout := uint32(3600)
 	if w.IdleTimeoutSec != nil {
 		idleTimeout = uint32(*w.IdleTimeoutSec)
 	}
-
 	env := map[string]string{}
 	if w.SSHPassword != "" {
 		env["SSH_PASSWORD"] = w.SSHPassword
 	}
-
+	cmdID := uuid.New()
 	msg := &agentv1.ServerMessage{
-		CommandId: uuid.New().String(),
+		CommandId: cmdID.String(),
 		Payload: &agentv1.ServerMessage_Launch{
 			Launch: &agentv1.LaunchWorkload{
 				Spec: &workloadv1.WorkloadSpec{
 					WorkloadId:     w.ID.String(),
 					Image:          w.Image,
 					GpuCount:       uint32(w.RequestedGPUCount),
-					GpuUuids:       gpuUUIDs,
+					GpuUuids:       p.gpuUUIDs,
 					IdleTimeoutSec: idleTimeout,
 					Env:            env,
 					ExposeSsh:      w.ExposeSSH,
@@ -638,12 +865,22 @@ func (s *ServiceImpl) sendLaunchCommand(ctx context.Context, nodeID uuid.UUID, w
 			},
 		},
 	}
-	_ = s.dispatch.Send(ctx, nodeID, msg)
+	payload, err := proto.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	wid := w.ID
+	deadline := time.Now().Add(launchDeliveryDeadline)
+	return commands.Enqueue(ctx, tx, commands.Command{
+		ID: cmdID, OrgID: w.OrgID, NodeID: p.nodeID, WorkloadID: &wid,
+		Kind: commands.KindLaunch, Payload: payload, DeliverBy: &deadline,
+	})
 }
 
-func (s *ServiceImpl) sendStopCommand(ctx context.Context, nodeID, workloadID uuid.UUID, reason domain.StopReason) {
+func (s *ServiceImpl) enqueueStop(ctx context.Context, db commands.DB, orgID, nodeID, workloadID uuid.UUID, reason domain.StopReason) error {
+	cmdID := uuid.New()
 	msg := &agentv1.ServerMessage{
-		CommandId: uuid.New().String(),
+		CommandId: cmdID.String(),
 		Payload: &agentv1.ServerMessage_Stop{
 			Stop: &agentv1.StopWorkload{
 				WorkloadId: workloadID.String(),
@@ -651,7 +888,16 @@ func (s *ServiceImpl) sendStopCommand(ctx context.Context, nodeID, workloadID uu
 			},
 		},
 	}
-	_ = s.dispatch.Send(ctx, nodeID, msg)
+	payload, err := proto.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	// No deliver_by: a stop stays deliverable until the workload reaches a terminal
+	// state by some other path (sweep), at which point it is superseded.
+	return commands.Enqueue(ctx, db, commands.Command{
+		ID: cmdID, OrgID: orgID, NodeID: nodeID, WorkloadID: &workloadID,
+		Kind: commands.KindStop, Payload: payload,
+	})
 }
 
 func domainToProtoStopReason(r domain.StopReason) workloadv1.StopReason {

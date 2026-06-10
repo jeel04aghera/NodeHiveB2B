@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/nodehive/gpu-platform/internal/domain"
 	"github.com/nodehive/gpu-platform/internal/identity"
 )
 
@@ -110,7 +111,13 @@ func (a *API) refresh(w http.ResponseWriter, r *http.Request) {
 // logout revokes the current session and clears the refresh cookie. Idempotent.
 func (a *API) logout(w http.ResponseWriter, r *http.Request) {
 	if raw := readRefreshCookie(r); raw != "" {
-		_ = a.identity.RevokeSessionByRefresh(r.Context(), raw)
+		userID, orgID, err := a.identity.RevokeSessionByRefresh(r.Context(), raw)
+		if err == nil && userID != uuid.Nil {
+			a.auditEvent(r, domain.AuditLog{
+				OrgID: orgID, ActorType: "user", ActorID: userID.String(),
+				Action: "auth.logout", TargetType: "user", TargetID: userID.String(),
+			})
+		}
 	}
 	a.clearRefreshCookie(w)
 	w.WriteHeader(http.StatusNoContent)
@@ -154,6 +161,7 @@ func (a *API) revokeSession(w http.ResponseWriter, r *http.Request) {
 	if currentID, err := a.identity.SessionIDByRefresh(r.Context(), readRefreshCookie(r)); err == nil && currentID == id {
 		a.clearRefreshCookie(w)
 	}
+	a.userEvent(r, u, "session.revoke", "session", id.String(), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -169,5 +177,6 @@ func (a *API) revokeAllSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not revoke sessions")
 		return
 	}
+	a.userEvent(r, u, "session.revoke_all", "user", u.ID.String(), nil)
 	w.WriteHeader(http.StatusNoContent)
 }

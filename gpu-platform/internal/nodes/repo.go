@@ -23,6 +23,7 @@ var (
 	ErrTokenExpired        = errors.New("enrollment token expired")
 	ErrTokenExhausted      = errors.New("enrollment token exhausted")
 	ErrFingerprintConflict = errors.New("fingerprint already enrolled by another organization")
+	ErrNodeBusy            = errors.New("node has active workloads")
 )
 
 // NodeView is the read model returned to the API (includes derived gpu_count).
@@ -276,6 +277,84 @@ func (r *Repo) RevokeNodeCredentials(ctx context.Context, orgID, nodeID uuid.UUI
 		return 0, err
 	}
 	return int(ct.RowsAffected()), nil
+}
+
+// RemoveResult summarizes what a node removal did.
+type RemoveResult struct {
+	ActiveWorkloads    int // active at removal time (failed when force=true)
+	FailedWorkloads    int // workloads marked failed by a forced removal
+	CredentialsRevoked int
+}
+
+// RemoveNode permanently removes a node (org-scoped), in one transaction:
+//
+//  1. With active workloads and force=false it refuses (ErrNodeBusy) — the safe
+//     path is stop-then-remove, so running containers are torn down by the normal
+//     stop flow first.
+//  2. force=true marks the node's active workloads failed and detaches their GPUs
+//     (the node is presumed dead/decommissioned; if its agent is somehow alive,
+//     containers on the box are orphaned — the operator accepted that with force).
+//  3. All agent credentials are revoked, so the box cannot re-authenticate, then
+//     the node row is deleted: GPUs and queued commands die with it (CASCADE),
+//     workload history keeps node_id=NULL, usage records keep their numbers
+//     (gpu_id=NULL). The same fingerprint can re-enroll later as a fresh node.
+func (r *Repo) RemoveNode(ctx context.Context, orgID, nodeID uuid.UUID, force bool) (RemoveResult, error) {
+	var res RemoveResult
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return res, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var locked uuid.UUID
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM gpu_nodes WHERE id=$1 AND org_id=$2 FOR UPDATE`, nodeID, orgID).Scan(&locked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return res, ErrNotFound
+	}
+	if err != nil {
+		return res, err
+	}
+
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM workloads
+		  WHERE node_id=$1 AND status IN ('pending','running','stopping')`, nodeID).
+		Scan(&res.ActiveWorkloads); err != nil {
+		return res, err
+	}
+	if res.ActiveWorkloads > 0 && !force {
+		return res, ErrNodeBusy
+	}
+	if res.ActiveWorkloads > 0 {
+		ct, err := tx.Exec(ctx,
+			`UPDATE workloads SET status='failed', stage='failed', stopped_at=now(),
+			        stop_reason=COALESCE(stop_reason,'admin'),
+			        logs=COALESCE(NULLIF(logs,''),'node removed by administrator')
+			  WHERE node_id=$1 AND status IN ('pending','running','stopping')`, nodeID)
+		if err != nil {
+			return res, err
+		}
+		res.FailedWorkloads = int(ct.RowsAffected())
+		if _, err := tx.Exec(ctx,
+			`UPDATE workload_gpus wg SET detached_at=now()
+			  FROM gpus g
+			 WHERE wg.gpu_id=g.id AND g.node_id=$1 AND wg.detached_at IS NULL`, nodeID); err != nil {
+			return res, err
+		}
+	}
+
+	ct, err := tx.Exec(ctx,
+		`UPDATE agent_credentials SET revoked_at=now()
+		  WHERE node_id=$1 AND revoked_at IS NULL`, nodeID)
+	if err != nil {
+		return res, err
+	}
+	res.CredentialsRevoked = int(ct.RowsAffected())
+
+	if _, err := tx.Exec(ctx, `DELETE FROM gpu_nodes WHERE id=$1`, nodeID); err != nil {
+		return res, err
+	}
+	return res, tx.Commit(ctx)
 }
 
 // EnsureEnrollmentToken upserts a token by hash (used to seed the dev token).

@@ -72,6 +72,25 @@ type jwtClaims struct {
 	jwt.RegisteredClaims
 }
 
+// OrgIDByEmail resolves the org an email belongs to, for audit attribution of failed
+// logins. uuid.Nil when the email is unknown or the account is pre-onboarding.
+func (s *ServiceImpl) OrgIDByEmail(ctx context.Context, email string) (uuid.UUID, error) {
+	email = strings.TrimSpace(strings.ToLower(email))
+	var orgID *uuid.UUID
+	err := s.db.QueryRow(ctx,
+		`SELECT org_id FROM users WHERE email = $1 LIMIT 1`, email).Scan(&orgID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, nil
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if orgID == nil {
+		return uuid.Nil, nil
+	}
+	return *orgID, nil
+}
+
 func (s *ServiceImpl) Login(ctx context.Context, email, password string) (string, domain.User, error) {
 	email = strings.TrimSpace(strings.ToLower(email))
 	// Find user by email (any org — for single-org V1 we match on email alone).

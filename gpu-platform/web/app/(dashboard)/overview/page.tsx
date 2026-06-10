@@ -37,10 +37,12 @@ export default function OverviewPage() {
     };
   }, []);
   const { data: spend } = useChargeback(from, to, "department");
-  const { data: activity } = useAuditLogs(
-    new Date(Date.now() - 7 * 86400_000).toISOString(),
-    new Date().toISOString(),
-  );
+  const { data: auditPage } = useAuditLogs({
+    from: new Date(Date.now() - 7 * 86400_000).toISOString(),
+    to: new Date().toISOString(),
+    limit: 10,
+  });
+  const activity = auditPage?.items;
 
   const total = summary?.gpu_total ?? 0;
   const idle = summary?.gpus_idle ?? 0;

@@ -41,6 +41,10 @@ type Executor interface {
 	Stop(ctx context.Context, workloadID string) error
 	Status(ctx context.Context, workloadID string) (Status, error)
 	Logs(ctx context.Context, workloadID string, tail int) (string, error)
+	// List enumerates every NodeHive-managed workload present on this host with its
+	// live state (running containers include recovered SSH/Jupyter endpoints).
+	// Used for reconciliation after the agent or control plane reconnects.
+	List(ctx context.Context) ([]Status, error)
 }
 
 // Options configure the Docker executor.

@@ -97,7 +97,7 @@ func TestEnrollHeartbeatAndList(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	dispatcher := agentgw.GlobalDispatcher
 	billingSvc := billing.NewService(pool)
-	wlSvc := workloads.NewService(pool, agentgw.NewAgentDispatcher(dispatcher), billingSvc)
+	wlSvc := workloads.NewService(pool, agentgw.NewDeliveryEngine(pool, dispatcher, slog.Default()), billingSvc)
 	inventorySvc := inventory.NewService(pool)
 	telemetrySvc := telemetry.NewService(pool)
 	auditSvc := audit.NewService(pool)
@@ -107,7 +107,7 @@ func TestEnrollHeartbeatAndList(t *testing.T) {
 	}
 	grpcSrv := grpc.NewServer(grpc.ChainStreamInterceptor(agentgw.StreamAuthInterceptor(svc)))
 	agentv1.RegisterAgentServiceServer(grpcSrv,
-		agentgw.NewServer(svc, inventorySvc, telemetrySvc, wlSvc, auditSvc, dispatcher, log))
+		agentgw.NewServer(svc, inventorySvc, telemetrySvc, wlSvc, auditSvc, dispatcher, agentgw.NewDeliveryEngine(pool, dispatcher, log), log))
 	go func() { _ = grpcSrv.Serve(lis) }()
 	t.Cleanup(grpcSrv.Stop)
 

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -19,6 +20,7 @@ import (
 
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -42,6 +44,52 @@ type Agent struct {
 	discoverer discovery.Discoverer
 	sampler    metrics.Sampler
 	exec       executor.Executor
+	cmds       cmdTracker
+}
+
+// cmdTracker deduplicates server commands. Delivery is at-least-once (the control
+// plane resends until it sees a CommandResult), so the same command id may arrive
+// again while the first execution is still in flight (long image pull) or after it
+// finished (ack lost to a reconnect). In-flight duplicates are dropped; finished
+// ones get their cached result resent.
+type cmdTracker struct {
+	mu       sync.Mutex
+	inflight map[string]bool
+	done     map[string]*agentv1.CommandResult
+	order    []string // FIFO of done ids for trimming
+}
+
+const cmdDoneCacheSize = 256
+
+// begin returns (true, nil) for a new command, (false, cached) for one that
+// already finished, and (false, nil) for one still in flight.
+func (t *cmdTracker) begin(id string) (fresh bool, cached *agentv1.CommandResult) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.inflight == nil {
+		t.inflight = map[string]bool{}
+		t.done = map[string]*agentv1.CommandResult{}
+	}
+	if res, ok := t.done[id]; ok {
+		return false, res
+	}
+	if t.inflight[id] {
+		return false, nil
+	}
+	t.inflight[id] = true
+	return true, nil
+}
+
+func (t *cmdTracker) finish(id string, res *agentv1.CommandResult) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.inflight, id)
+	t.done[id] = res
+	t.order = append(t.order, id)
+	for len(t.order) > cmdDoneCacheSize {
+		delete(t.done, t.order[0])
+		t.order = t.order[1:]
+	}
 }
 
 func New(cfg config.AgentConfig, log *slog.Logger) (*Agent, error) {
@@ -159,11 +207,14 @@ func (a *Agent) runStream(ctx context.Context, c agentv1.AgentServiceClient) err
 	// Channel to propagate errors from goroutines back to the main loop.
 	errc := make(chan error, 4)
 
-	// 1. Discover + send inventory immediately.
+	// 1. Discover + send inventory immediately, then reconcile: report what is
+	// ACTUALLY on this box (running containers with endpoints, corpses with logs)
+	// so the control plane repairs any state it lost while we were apart.
 	go func() {
 		if err := a.sendInventory(streamCtx, stream); err != nil {
 			a.log.Warn("inventory send failed", "err", err)
 		}
+		a.reconcileWorkloads(streamCtx, stream)
 	}()
 
 	// 2. Heartbeat loop.
@@ -300,6 +351,50 @@ func (a *Agent) metricsLoop(ctx context.Context, stream agentv1.AgentService_Con
 	}
 }
 
+// ── Reconciliation ───────────────────────────────────────────────────────────
+
+// reconcileWorkloads reports every NodeHive workload found on the host. The
+// control plane's UpdateStatus is idempotent and never resurrects terminal
+// workloads, so these reports are safe to repeat on every connect: they flip
+// pending→running for launches whose original report was lost, mark workloads
+// whose container died while we were disconnected, and surface leaked containers
+// (the control plane answers those with a stop command).
+func (a *Agent) reconcileWorkloads(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
+	statuses, err := a.exec.List(ctx)
+	if err != nil {
+		a.log.Warn("workload reconcile failed", "err", err)
+		return
+	}
+	for _, st := range statuses {
+		state := workloadv1.WorkloadState_WORKLOAD_STATE_RUNNING
+		if st.State != "running" {
+			state = workloadv1.WorkloadState_WORKLOAD_STATE_STOPPED
+		}
+		msg := st.Message
+		if st.Logs != "" {
+			msg += "\n---LOGS---\n" + st.Logs
+		}
+		if err := stream.Send(&agentv1.AgentMessage{
+			Payload: &agentv1.AgentMessage_WorkloadStatus{
+				WorkloadStatus: &workloadv1.WorkloadStatus{
+					WorkloadId:      st.WorkloadID,
+					State:           state,
+					SshEndpoint:     st.SSHEndpoint,
+					JupyterEndpoint: st.JupyterEndpoint,
+					Message:         msg,
+					UpdatedAt:       timestamppb.Now(),
+				},
+			},
+		}); err != nil {
+			a.log.Warn("reconcile status send failed", "workload_id", st.WorkloadID, "err", err)
+			return
+		}
+	}
+	if len(statuses) > 0 {
+		a.log.Info("reconciled workloads with control plane", "count", len(statuses))
+	}
+}
+
 // ── Command recv loop ────────────────────────────────────────────────────────
 
 func (a *Agent) recvLoop(ctx context.Context, stream agentv1.AgentService_ConnectClient) error {
@@ -312,8 +407,38 @@ func (a *Agent) recvLoop(ctx context.Context, stream agentv1.AgentService_Connec
 	}
 }
 
+// sendResult reports a command's outcome and caches it so a redelivered duplicate
+// gets the same answer instead of being executed twice.
+func (a *Agent) sendResult(stream agentv1.AgentService_ConnectClient, cmdID string, ok bool, errStr string) {
+	res := &agentv1.CommandResult{CommandId: cmdID, Ok: ok, Error: errStr}
+	if cmdID != "" {
+		a.cmds.finish(cmdID, res)
+	}
+	_ = stream.Send(&agentv1.AgentMessage{
+		Payload: &agentv1.AgentMessage_CommandResult{CommandResult: res},
+	})
+}
+
 func (a *Agent) handleCommand(ctx context.Context, stream agentv1.AgentService_ConnectClient, msg *agentv1.ServerMessage) {
 	cmdID := msg.GetCommandId()
+
+	// At-least-once delivery dedup: drop duplicates of an in-flight command, and
+	// answer duplicates of a finished one with its cached result (the resend means
+	// the control plane never saw our ack).
+	if cmdID != "" {
+		fresh, cached := a.cmds.begin(cmdID)
+		if cached != nil {
+			a.log.Info("re-acking duplicate command", "cmd_id", cmdID)
+			_ = stream.Send(&agentv1.AgentMessage{
+				Payload: &agentv1.AgentMessage_CommandResult{CommandResult: cached},
+			})
+			return
+		}
+		if !fresh {
+			a.log.Info("ignoring duplicate of in-flight command", "cmd_id", cmdID)
+			return
+		}
+	}
 
 	switch p := msg.GetPayload().(type) {
 
@@ -380,13 +505,7 @@ func (a *Agent) handleCommand(ctx context.Context, stream agentv1.AgentService_C
 				},
 			},
 		})
-		_ = stream.Send(&agentv1.AgentMessage{
-			Payload: &agentv1.AgentMessage_CommandResult{CommandResult: &agentv1.CommandResult{
-				CommandId: cmdID,
-				Ok:        err == nil,
-				Error:     msg,
-			}},
-		})
+		a.sendResult(stream, cmdID, err == nil, msg)
 
 	case *agentv1.ServerMessage_Stop:
 		wid := p.Stop.GetWorkloadId()
@@ -417,22 +536,12 @@ func (a *Agent) handleCommand(ctx context.Context, stream agentv1.AgentService_C
 				},
 			},
 		})
-		_ = stream.Send(&agentv1.AgentMessage{
-			Payload: &agentv1.AgentMessage_CommandResult{CommandResult: &agentv1.CommandResult{
-				CommandId: cmdID,
-				Ok:        err == nil,
-				Error:     errStr,
-			}},
-		})
+		a.sendResult(stream, cmdID, err == nil, errStr)
 
 	case *agentv1.ServerMessage_GetInventory:
 		a.log.Info("get_inventory command")
 		_ = a.sendInventory(ctx, stream)
-		_ = stream.Send(&agentv1.AgentMessage{
-			Payload: &agentv1.AgentMessage_CommandResult{CommandResult: &agentv1.CommandResult{
-				CommandId: cmdID, Ok: true,
-			}},
-		})
+		a.sendResult(stream, cmdID, true, "")
 
 	default:
 		a.log.Warn("unknown server message", "cmd_id", cmdID)
@@ -489,5 +598,15 @@ func (a *Agent) dial() (*grpc.ClientConn, error) {
 		// Use system root CAs (production with a real cert)
 		creds = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS13})
 	}
-	return grpc.NewClient(a.cfg.ServerAddr, grpc.WithTransportCredentials(creds))
+	// Keepalive: without it a dead path (control-plane restart, NAT timeout) is only
+	// noticed on the next write, so the agent could sit on a zombie stream while
+	// launches queued for it expired. Pings every 30s detect it within ~40s and the
+	// reconnect loop (with command redelivery + reconcile) takes over.
+	return grpc.NewClient(a.cfg.ServerAddr,
+		grpc.WithTransportCredentials(creds),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                30 * time.Second,
+			Timeout:             10 * time.Second,
+			PermitWithoutStream: true,
+		}))
 }

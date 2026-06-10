@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"github.com/nodehive/gpu-platform/internal/identity"
 	"github.com/nodehive/gpu-platform/internal/inventory"
 	"github.com/nodehive/gpu-platform/internal/nodes"
+	"github.com/nodehive/gpu-platform/internal/obs"
 	"github.com/nodehive/gpu-platform/internal/ops"
 	"github.com/nodehive/gpu-platform/internal/policy"
 	"github.com/nodehive/gpu-platform/internal/telemetry"
@@ -61,6 +64,19 @@ type API struct {
 	// agents verify with system roots instead).
 	grpcTLS    bool
 	agentCAPEM []byte
+
+	// kickNode force-closes a removed node's live agent stream (Phase 4 — node
+	// removal). nil => removal still works, the stream just lingers until it drops.
+	kickNode func(nodeID uuid.UUID) bool
+
+	// Observability (Phase 5). log: structured request/audit logging (slog.Default
+	// when unset, e.g. tests). health: component checks behind /readyz and the admin
+	// diagnostics endpoint. metrics + metricsToken: Prometheus /metrics and its
+	// bearer gate (see metricsHandler for the fail-closed production posture).
+	log          *slog.Logger
+	health       *obs.Health
+	metrics      *obs.Metrics
+	metricsToken string
 }
 
 // Option configures optional API features without breaking existing NewRouter callers.
@@ -95,6 +111,26 @@ func WithAgentTransport(tlsEnabled bool, caPEM []byte) Option {
 	return func(a *API) { a.grpcTLS, a.agentCAPEM = tlsEnabled, caPEM }
 }
 
+// WithNodeKicker lets node removal force-close a removed node's live agent stream
+// (the dispatcher's Kick). Optional: without it the stream lingers until it drops
+// on its own, but the node's credentials are already revoked either way.
+func WithNodeKicker(kick func(nodeID uuid.UUID) bool) Option {
+	return func(a *API) { a.kickNode = kick }
+}
+
+// WithLogger sets the structured logger used for access logs, panics and audit
+// write failures (slog.Default otherwise).
+func WithLogger(l *slog.Logger) Option { return func(a *API) { a.log = l } }
+
+// WithHealth enables /readyz and the admin diagnostics endpoint.
+func WithHealth(h *obs.Health) Option { return func(a *API) { a.health = h } }
+
+// WithMetrics enables Prometheus /metrics. token gates the endpoint with Bearer
+// auth; empty token = open in dev, disabled (404) in production.
+func WithMetrics(m *obs.Metrics, token string) Option {
+	return func(a *API) { a.metrics, a.metricsToken = m, token }
+}
+
 func NewRouter(
 	nodesSvc *nodes.Service,
 	identitySvc identity.Service,
@@ -124,9 +160,15 @@ func NewRouter(
 
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
+	r.Use(requestIDMiddleware) // correlation IDs before logging so every line has one
+	r.Use(a.requestLogger)     // structured access log (replaces chi middleware.Logger)
+	r.Use(a.recoverer)         // panic → 500 + Sentry (replaces chi middleware.Recoverer)
 	r.Use(a.corsMiddleware)
+
+	// Probes + metrics (public; metrics is token-gated, see metricsHandler).
+	r.Get("/healthz", a.healthz)
+	r.Get("/readyz", a.readyz)
+	r.Method("GET", "/metrics", a.metricsHandler())
 
 	// Agent distribution (public): one-line installer + prebuilt binaries.
 	r.Get("/install.sh", a.installScript)
@@ -145,7 +187,7 @@ func NewRouter(
 	tokenProbeLimiter := newRateLimiter(30, time.Minute)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Get("/healthz", a.health)
+		r.Get("/healthz", a.healthz) // legacy path, same liveness semantics
 
 		// Auth (public)
 		r.With(loginLimiter.middleware).Post("/auth/login", a.login)
@@ -194,6 +236,10 @@ func NewRouter(
 				// lost/compromised box must re-enroll with a fresh token.
 				r.With(a.requireRole(domain.RoleAdmin)).
 					Post("/nodes/{id}/revoke-credentials", a.revokeNodeCredentials)
+				// Node removal (admin): refuses with 409 while workloads are active
+				// unless ?force=true (Phase 4 — node removal lifecycle).
+				r.With(a.requireRole(domain.RoleAdmin)).
+					Delete("/nodes/{id}", a.removeNode)
 
 				// GPUs
 				r.Get("/gpus", a.listGPUs)
@@ -266,8 +312,11 @@ func NewRouter(
 				r.Post("/enrollment-tokens", a.issueToken)
 				r.Delete("/enrollment-tokens/{id}", a.revokeToken)
 
-				// Audit
-				r.Get("/audit-logs", a.auditLogs)
+				// Audit (searchable: action/actor/target/q/from/to/limit/offset)
+				r.Get("/audit-logs", a.auditLogsSearch)
+
+				// Deployment diagnostics (admin): db / queue / agents / jobs health
+				r.With(a.requireRole(domain.RoleAdmin)).Get("/health", a.adminHealth)
 
 				// Reservations (F4)
 				r.Get("/reservations", a.listReservations)
@@ -305,6 +354,13 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	}
 	token, user, err := a.identity.Login(r.Context(), body.Email, body.Password)
 	if errors.Is(err, identity.ErrInvalidCredentials) {
+		// Failed logins are security-relevant: attribute to the account's org when the
+		// email is known so its admins can see brute-force attempts against members.
+		orgID, _ := a.identity.OrgIDByEmail(r.Context(), body.Email)
+		a.auditEvent(r, domain.AuditLog{
+			OrgID: orgID, ActorType: "user",
+			Action: "auth.login_failed", TargetType: "user", TargetID: body.Email,
+		})
 		writeErr(w, 401, "unauthorized", "invalid email or password")
 		return
 	}
@@ -313,6 +369,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.startSession(w, r, user.ID) // additive: also sets the refresh cookie
+	a.userEvent(r, user, "auth.login", "user", user.ID.String(), map[string]any{"method": "password"})
 	writeJSON(w, 200, map[string]any{
 		"token": token,
 		"user":  userResponse(user),
@@ -340,6 +397,9 @@ func (a *API) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.startSession(w, r, user.ID) // additive: also sets the refresh cookie
+	a.userEvent(r, user, "auth.register", "user", user.ID.String(), map[string]any{"method": "password"})
+	a.userEvent(r, user, "org.create", "organization", user.OrgID.String(),
+		map[string]any{"org_name": body.OrgName})
 	writeJSON(w, 201, map[string]any{
 		"token": token,
 		"user":  userResponse(user),
@@ -441,14 +501,49 @@ func (a *API) revokeNodeCredentials(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not revoke credentials")
 		return
 	}
-	go func() {
-		_ = a.audit.Record(context.Background(), domain.AuditLog{
-			OrgID: u.OrgID, ActorType: "user", ActorID: u.ID.String(),
-			Action: "node.revoke_credentials", TargetType: "node", TargetID: id.String(),
-			Metadata: map[string]any{"revoked": n},
-		})
-	}()
+	a.userEvent(r, u, "node.revoke_credentials", "node", id.String(), map[string]any{"revoked": n})
 	writeJSON(w, 200, map[string]any{"revoked": n})
+}
+
+// removeNode permanently removes a node (admin). 409 while workloads are active
+// unless ?force=true: force fails the workloads, frees their GPUs, revokes the
+// agent's credentials, kicks its live stream and deletes the node + GPUs.
+// Workload history survives with node_id=NULL; billing records are untouched.
+func (a *API) removeNode(w http.ResponseWriter, r *http.Request) {
+	id := parseUUID(w, r, "id")
+	if id == uuid.Nil {
+		return
+	}
+	u := userFromCtx(r)
+	force := r.URL.Query().Get("force") == "true"
+	res, err := a.nodes.Remove(r.Context(), u.OrgID, id, force)
+	if errors.Is(err, nodes.ErrNotFound) {
+		writeErr(w, 404, "not_found", "node not found")
+		return
+	}
+	if errors.Is(err, nodes.ErrNodeBusy) {
+		writeErr(w, 409, "node_busy", fmt.Sprintf(
+			"node has %d active workload(s); stop them first or retry with ?force=true", res.ActiveWorkloads))
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, "internal", "could not remove node")
+		return
+	}
+	kicked := false
+	if a.kickNode != nil {
+		kicked = a.kickNode(id)
+	}
+	a.userEvent(r, u, "node.remove", "node", id.String(), map[string]any{
+		"force": force, "failed_workloads": res.FailedWorkloads,
+		"credentials_revoked": res.CredentialsRevoked, "stream_kicked": kicked,
+	})
+	writeJSON(w, 200, map[string]any{
+		"removed":             true,
+		"failed_workloads":    res.FailedWorkloads,
+		"credentials_revoked": res.CredentialsRevoked,
+		"stream_kicked":       kicked,
+	})
 }
 
 func nodeLastSeen(t *time.Time) any {
@@ -619,12 +714,10 @@ func (a *API) launchWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go func() {
-		_ = a.audit.Record(context.Background(), domain.AuditLog{
-			OrgID: u.OrgID, ActorType: "user", ActorID: u.ID.String(),
-			Action: "workload.launch", TargetType: "workload", TargetID: wl.ID.String(),
-		})
-	}()
+	a.userEvent(r, u, "workload.launch", "workload", wl.ID.String(), map[string]any{
+		"name": wl.Name, "image": wl.Image, "gpu_count": wl.RequestedGPUCount,
+		"status": string(wl.Status),
+	})
 	// The launcher is the owner — they always see their own SSH credential.
 	writeJSON(w, 201, workloadResponse(wl, true))
 }
@@ -730,13 +823,8 @@ func (a *API) stopWorkload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not stop workload")
 		return
 	}
-	go func() {
-		_ = a.audit.Record(context.Background(), domain.AuditLog{
-			OrgID: u.OrgID, ActorType: "user", ActorID: u.ID.String(),
-			Action: "workload.stop", TargetType: "workload", TargetID: id.String(),
-			Metadata: map[string]any{"reason": string(reason)},
-		})
-	}()
+	a.userEvent(r, u, "workload.stop", "workload", id.String(),
+		map[string]any{"reason": string(reason)})
 	w.WriteHeader(204)
 }
 
@@ -896,6 +984,9 @@ func (a *API) setRate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not set rate")
 		return
 	}
+	a.userEvent(r, u, "billing.rate_set", "rate_card", rc.ID.String(), map[string]any{
+		"gpu_model": body.GPUModel, "rate_per_gpu_hour": body.RatePerGPUHour, "currency": body.Currency,
+	})
 	writeJSON(w, 201, rateCardResponse(rc))
 }
 
@@ -952,6 +1043,9 @@ func (a *API) topupCredits(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "validation", err.Error())
 		return
 	}
+	a.userEvent(r, u, "billing.topup", "credit_ledger", "", map[string]any{
+		"amount": body.Amount, "balance": balance, "description": body.Description,
+	})
 	writeJSON(w, 201, map[string]any{"balance": balance})
 }
 
@@ -981,6 +1075,7 @@ func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not create project")
 		return
 	}
+	a.userEvent(r, u, "project.create", "project", p.ID.String(), map[string]any{"name": body.Name})
 	writeJSON(w, 201, p)
 }
 
@@ -1031,13 +1126,8 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 			usr.DepartmentID = &did
 		}
 	}
-	go func() {
-		_ = a.audit.Record(context.Background(), domain.AuditLog{
-			OrgID: u.OrgID, ActorType: "user", ActorID: u.ID.String(),
-			Action: "user.create", TargetType: "user", TargetID: usr.ID.String(),
-			Metadata: map[string]any{"email": usr.Email, "role": string(usr.Role)},
-		})
-	}()
+	a.userEvent(r, u, "user.create", "user", usr.ID.String(),
+		map[string]any{"email": usr.Email, "role": string(usr.Role)})
 	writeJSON(w, 201, userResponse(usr))
 }
 
@@ -1068,28 +1158,9 @@ func (a *API) issueToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not issue token")
 		return
 	}
-	go func() {
-		_ = a.audit.Record(context.Background(), domain.AuditLog{
-			OrgID: u.OrgID, ActorType: "user", ActorID: u.ID.String(),
-			Action: "enrollment_token.issue", TargetType: "enrollment_token",
-			Metadata: map[string]any{"description": body.Description},
-		})
-	}()
+	a.userEvent(r, u, "enrollment_token.issue", "enrollment_token", "",
+		map[string]any{"description": body.Description, "ttl_days": body.TTLDays, "max_uses": maxUses})
 	writeJSON(w, 201, map[string]string{"token": raw})
-}
-
-// ── Audit ─────────────────────────────────────────────────────────────────────
-
-func (a *API) auditLogs(w http.ResponseWriter, r *http.Request) {
-	u := userFromCtx(r)
-	from := parseTime(r.URL.Query().Get("from"), time.Now().Add(-24*time.Hour))
-	to := parseTime(r.URL.Query().Get("to"), time.Now())
-	logs, err := a.audit.Query(r.Context(), u.OrgID, from, to, 100)
-	if err != nil {
-		writeErr(w, 500, "internal", "could not query audit logs")
-		return
-	}
-	writeJSON(w, 200, logs)
 }
 
 func (a *API) idleReport(w http.ResponseWriter, r *http.Request) {
@@ -1122,10 +1193,6 @@ func (a *API) idleReport(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *API) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]string{"status": "ok"})
-}
-
 // ── Auth middleware ───────────────────────────────────────────────────────────
 
 type ctxUserKey struct{}
@@ -1142,6 +1209,7 @@ func (a *API) authMiddleware(next http.Handler) http.Handler {
 			writeErr(w, 401, "unauthorized", "invalid or expired token")
 			return
 		}
+		noteUser(r.Context(), u) // attribute the access-log line to this principal
 		next.ServeHTTP(w, r.WithContext(withUser(r.Context(), u)))
 	})
 }
@@ -1181,6 +1249,7 @@ func (a *API) requireOrg(next http.Handler) http.Handler {
 //     a cross-origin localhost frontend can use the refresh-cookie flow without extra config.
 //   - no allow-list, production (misconfigured): fall back to "*" WITHOUT credentials — never
 //     reflect an arbitrary origin with credentials in prod (that would defeat CORS).
+//
 // "*" and credentials are mutually exclusive per the CORS spec, so they are never combined.
 func (a *API) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

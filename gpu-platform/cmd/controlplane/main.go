@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	grpcinsecure "google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/google/uuid"
 	agentv1 "github.com/nodehive/gpu-platform/gen/go/agent/v1"
@@ -31,6 +32,7 @@ import (
 	"github.com/nodehive/gpu-platform/internal/identity"
 	"github.com/nodehive/gpu-platform/internal/inventory"
 	"github.com/nodehive/gpu-platform/internal/nodes"
+	"github.com/nodehive/gpu-platform/internal/obs"
 	"github.com/nodehive/gpu-platform/internal/ops"
 	"github.com/nodehive/gpu-platform/internal/platform/config"
 	"github.com/nodehive/gpu-platform/internal/platform/db"
@@ -41,15 +43,25 @@ import (
 )
 
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-
 	cfg, err := config.Load()
 	if err != nil {
-		log.Error("config", "err", err)
+		slog.New(slog.NewTextHandler(os.Stdout, nil)).Error("config", "err", err)
 		os.Exit(1)
 	}
 
+	// Structured logging (Phase 5): JSON in production for log drains, text in dev.
+	// Error-level records are mirrored to Sentry when SENTRY_DSN is set.
+	log := obs.NewLogger(cfg.Obs.LogFormat, cfg.Obs.LogLevel)
+	slog.SetDefault(log)
+	if enabled, err := obs.InitSentry(cfg.Obs.SentryDSN, cfg.Env, cfg.Obs.Version); err != nil {
+		log.Warn("sentry init failed; continuing without error monitoring", "err", err)
+	} else if enabled {
+		log.Info("sentry error monitoring enabled", "env", cfg.Env, "release", cfg.Obs.Version)
+	}
+	defer obs.FlushSentry()
+
 	ctx := context.Background()
+	started := time.Now()
 
 	// Apply pending schema migrations before opening the pool. Idempotent and how
 	// the schema is created in container/Railway deployments (which only run the
@@ -71,7 +83,11 @@ func main() {
 
 	// ── Services ──────────────────────────────────────────────────────────────
 	dispatcher := agentgw.GlobalDispatcher
-	agentDispatch := agentgw.NewAgentDispatcher(dispatcher)
+	// Delivery engine: drains the agent_commands outbox to connected agents and
+	// implements workloads.Dispatcher (Nudge). Commands are durable rows written in
+	// the workload's own transaction, so a crash or disconnected agent delays
+	// delivery instead of losing it.
+	deliveryEngine := agentgw.NewDeliveryEngine(pool, dispatcher, log)
 
 	nodeRepo := nodes.NewRepo(pool)
 	nodeSvc := nodes.NewService(nodeRepo)
@@ -82,11 +98,42 @@ func main() {
 		identity.WithWelcomeCredit(cfg.Billing.WelcomeCredit))
 	inventorySvc := inventory.NewService(pool)
 	billingSvc := billing.NewService(pool, billing.WithEnforcement(cfg.Billing.Enforce))
-	workloadsSvc := workloads.NewService(pool, agentDispatch, billingSvc)
-	telemetrySvc := telemetry.NewService(pool)
 	auditSvc := audit.NewService(pool)
+	workloadsSvc := workloads.NewService(pool, deliveryEngine, billingSvc,
+		// System/agent lifecycle transitions (sweep reclaims, idle stops, agent-reported
+		// terminal states) land in the same tamper-evident audit trail as user actions.
+		workloads.WithAudit(func(c context.Context, e domain.AuditLog) {
+			if err := auditSvc.Record(c, e); err != nil {
+				log.Warn("audit record failed", "action", e.Action, "err", err)
+			}
+		}))
+	telemetrySvc := telemetry.NewService(pool, telemetry.WithRawRetention(cfg.Retention.RawMetrics))
 	policySvc := policy.NewService(pool)
 	opsSvc := ops.New(pool)
+
+	// ── Observability (Phase 5) ───────────────────────────────────────────────
+	// Job tracker: every background sweep reports its outcome so /api/v1/health and
+	// /metrics can flag a silently-failing loop. Registered up front with each job's
+	// cadence so a sweep that never starts still shows up unhealthy.
+	jobs := obs.NewJobTracker()
+	jobs.Register("offline_sweep", 30*time.Second)
+	jobs.Register("stuck_sweep", 30*time.Second)
+	jobs.Register("idle_sweep", 5*time.Minute)
+	jobs.Register("alert_eval", 60*time.Second)
+	jobs.Register("meter_sweep", 60*time.Second)
+	jobs.Register("queue_sweep", 20*time.Second)
+	jobs.Register("retention_sweep", time.Hour)
+
+	health := &obs.Health{
+		DB:              pool,
+		Jobs:            jobs,
+		ConnectedAgents: func() int { return len(dispatcher.ConnectedNodes()) },
+		Version:         cfg.Obs.Version,
+		Env:             cfg.Env,
+		GRPCTLS:         !cfg.GRPC.Insecure,
+		Started:         started,
+	}
+	metrics := obs.NewMetrics(health)
 
 	// ── Bootstrap ─────────────────────────────────────────────────────────────
 	// DEV_* bootstrap (known admin creds + a fixed enrollment token) runs ONLY in
@@ -113,10 +160,13 @@ func main() {
 	}
 
 	// ── Background jobs ───────────────────────────────────────────────────────
-	go runOfflineSweep(ctx, inventorySvc, workloadsSvc, log)
-	go runIdleSweep(ctx, policySvc, workloadsSvc, log)
-	go runAlertEval(ctx, opsSvc, log)
-	go runMeterSweep(ctx, billingSvc, log)
+	go deliveryEngine.Run(ctx)
+	go runOfflineSweep(ctx, inventorySvc, workloadsSvc, jobs, log)
+	go runIdleSweep(ctx, policySvc, workloadsSvc, jobs, log)
+	go runAlertEval(ctx, opsSvc, jobs, log)
+	go runMeterSweep(ctx, billingSvc, jobs, log)
+	go runQueueSweep(ctx, workloadsSvc, jobs, log)
+	go runRetentionSweep(ctx, telemetrySvc, cfg.Retention, jobs, log)
 
 	// ── gRPC agent gateway ────────────────────────────────────────────────────
 	grpcCreds, agentCAPEM, err := grpcServerCreds(ctx, cfg, pool, log)
@@ -127,9 +177,21 @@ func main() {
 	grpcSrv := grpc.NewServer(
 		grpc.Creds(grpcCreds),
 		grpc.ChainStreamInterceptor(agentgw.StreamAuthInterceptor(nodeSvc)),
+		// Mirror the agent's 30s keepalive pings (anything stricter than MinTime
+		// would close the connection with ENHANCE_YOUR_CALM) and probe idle agents
+		// from this side too, so half-dead streams are torn down and the agent's
+		// reconnect (with command redelivery) kicks in within ~a minute.
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    30 * time.Second,
+			Timeout: 10 * time.Second,
+		}),
 	)
 	agentv1.RegisterAgentServiceServer(grpcSrv,
-		agentgw.NewServer(nodeSvc, inventorySvc, telemetrySvc, workloadsSvc, auditSvc, dispatcher, log))
+		agentgw.NewServer(nodeSvc, inventorySvc, telemetrySvc, workloadsSvc, auditSvc, dispatcher, deliveryEngine, log))
 	lis, err := net.Listen("tcp", cfg.GRPC.Addr)
 	if err != nil {
 		log.Error("grpc listen", "err", err)
@@ -156,6 +218,10 @@ func main() {
 			httpapi.WithEmailSender(email.NewSender(cfg.Email.ResendAPIKey, cfg.Email.FromEmail, log)),
 			httpapi.WithSelfTopup(cfg.Billing.AllowSelfTopup),
 			httpapi.WithAgentTransport(!cfg.GRPC.Insecure, agentCAPEM),
+			httpapi.WithNodeKicker(dispatcher.Kick),
+			httpapi.WithLogger(log),
+			httpapi.WithHealth(health),
+			httpapi.WithMetrics(metrics, cfg.Obs.MetricsToken),
 		),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -239,7 +305,7 @@ func hostOnly(addr string) string {
 	return addr
 }
 
-func runOfflineSweep(ctx context.Context, inv inventory.Service, wls workloads.Service, log *slog.Logger) {
+func runOfflineSweep(ctx context.Context, inv inventory.Service, wls workloads.Service, jobs *obs.JobTracker, log *slog.Logger) {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
@@ -247,10 +313,14 @@ func runOfflineSweep(ctx context.Context, inv inventory.Service, wls workloads.S
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := inv.SweepOffline(ctx); err != nil {
+			err := inv.SweepOffline(ctx)
+			jobs.Record("offline_sweep", err)
+			if err != nil {
 				log.Warn("offline sweep failed", "err", err)
 			}
-			if n, err := wls.SweepStuck(ctx); err != nil {
+			n, err := wls.SweepStuck(ctx)
+			jobs.Record("stuck_sweep", err)
+			if err != nil {
 				log.Warn("stuck workload sweep failed", "err", err)
 			} else if n > 0 {
 				log.Info("reclaimed stuck workloads", "count", n)
@@ -264,7 +334,7 @@ func runOfflineSweep(ctx context.Context, inv inventory.Service, wls workloads.S
 // settlement was lost. 60s cadence; the per-workload minimum slice lives in billing,
 // so frequent ticks are cheap no-ops. This is what makes billing restart-safe: all
 // metering state is the metered_until watermark in the database.
-func runMeterSweep(ctx context.Context, b billing.Service, log *slog.Logger) {
+func runMeterSweep(ctx context.Context, b billing.Service, jobs *obs.JobTracker, log *slog.Logger) {
 	t := time.NewTicker(60 * time.Second)
 	defer t.Stop()
 	for {
@@ -272,7 +342,9 @@ func runMeterSweep(ctx context.Context, b billing.Service, log *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if n, err := b.MeterRunning(ctx); err != nil {
+			n, err := b.MeterRunning(ctx)
+			jobs.Record("meter_sweep", err)
+			if err != nil {
 				log.Warn("metering sweep error", "err", err, "metered", n)
 			} else if n > 0 {
 				log.Info("metered workloads", "count", n)
@@ -284,7 +356,7 @@ func runMeterSweep(ctx context.Context, b billing.Service, log *slog.Logger) {
 // runAlertEval periodically evaluates cost-alert rules (F5) and raises alerts.
 // 60s cadence: spend/runtime thresholds don't need finer granularity, and the
 // evaluator is idempotent (active alerts are deduplicated), so re-runs are cheap.
-func runAlertEval(ctx context.Context, opsSvc *ops.Service, log *slog.Logger) {
+func runAlertEval(ctx context.Context, opsSvc *ops.Service, jobs *obs.JobTracker, log *slog.Logger) {
 	t := time.NewTicker(60 * time.Second)
 	defer t.Stop()
 	for {
@@ -292,7 +364,9 @@ func runAlertEval(ctx context.Context, opsSvc *ops.Service, log *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if n, err := opsSvc.EvaluateAll(ctx); err != nil {
+			n, err := opsSvc.EvaluateAll(ctx)
+			jobs.Record("alert_eval", err)
+			if err != nil {
 				log.Warn("alert evaluation failed", "err", err)
 			} else if n > 0 {
 				log.Info("cost alerts raised", "count", n)
@@ -301,7 +375,73 @@ func runAlertEval(ctx context.Context, opsSvc *ops.Service, log *slog.Logger) {
 	}
 }
 
-func runIdleSweep(ctx context.Context, pol policy.Service, wls workloads.Service, log *slog.Logger) {
+// runQueueSweep periodically promotes queued workloads (F3) fleet-wide. This is
+// what makes promotion reliable: the event-driven nudge after a stop is just a
+// latency optimization, while this tick guarantees a queued workload starts even
+// if that nudge was lost to a crash, or capacity appeared without a stop event
+// (new node enrolled, sweep-freed GPUs, credits topped up).
+func runQueueSweep(ctx context.Context, wls workloads.Service, jobs *obs.JobTracker, log *slog.Logger) {
+	t := time.NewTicker(20 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			n, err := wls.PromoteAllQueued(ctx)
+			jobs.Record("queue_sweep", err)
+			if err != nil {
+				log.Warn("queue promotion sweep failed", "err", err)
+			} else if n > 0 {
+				log.Info("promoted queued workloads", "count", n)
+			}
+		}
+	}
+}
+
+// runRetentionSweep ages out time-series data hourly (raw GPU metrics roll up to
+// gpu_metrics_hourly first, so long-range utilization survives). The first sweep
+// runs shortly after boot so a long-stopped deployment catches up quickly.
+func runRetentionSweep(ctx context.Context, tel telemetry.Service, cfg config.RetentionConfig, jobs *obs.JobTracker, log *slog.Logger) {
+	policy := telemetry.RetentionPolicy{
+		RawMetrics:    cfg.RawMetrics,
+		RollupMetrics: cfg.RollupMetrics,
+		Heartbeats:    cfg.Heartbeats,
+		Events:        cfg.Events,
+	}
+	run := func() {
+		st, err := tel.SweepRetention(ctx, policy)
+		jobs.Record("retention_sweep", err)
+		if err != nil {
+			log.Warn("retention sweep failed", "err", err)
+			return
+		}
+		if st.RawDeleted+st.HeartbeatDeleted+st.EventsDeleted+st.RollupsDeleted > 0 {
+			log.Info("retention sweep",
+				"rolled_up_hours", st.RolledUpHours, "raw_deleted", st.RawDeleted,
+				"heartbeats_deleted", st.HeartbeatDeleted, "events_deleted", st.EventsDeleted,
+				"rollups_deleted", st.RollupsDeleted)
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(2 * time.Minute):
+		run()
+	}
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			run()
+		}
+	}
+}
+
+func runIdleSweep(ctx context.Context, pol policy.Service, wls workloads.Service, jobs *obs.JobTracker, log *slog.Logger) {
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
 	for {
@@ -313,6 +453,7 @@ func runIdleSweep(ctx context.Context, pol policy.Service, wls workloads.Service
 				log.Info("idle auto-stop", "workload_id", id)
 				return wls.Stop(c, id, domain.StopIdleReclaim)
 			})
+			jobs.Record("idle_sweep", err)
 			if err != nil {
 				log.Warn("idle sweep error", "err", err)
 			} else if n > 0 {

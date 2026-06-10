@@ -45,6 +45,12 @@ func (s *Service) RevokeCredentials(ctx context.Context, orgID, nodeID uuid.UUID
 	return s.repo.RevokeNodeCredentials(ctx, orgID, nodeID)
 }
 
+// Remove permanently removes a node (org-scoped). With active workloads it refuses
+// unless force is set; see Repo.RemoveNode for the full lifecycle.
+func (s *Service) Remove(ctx context.Context, orgID, nodeID uuid.UUID, force bool) (RemoveResult, error) {
+	return s.repo.RemoveNode(ctx, orgID, nodeID, force)
+}
+
 func (s *Service) List(ctx context.Context, orgID uuid.UUID) ([]NodeView, error) {
 	return s.repo.ListNodes(ctx, orgID)
 }

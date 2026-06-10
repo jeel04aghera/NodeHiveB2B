@@ -592,13 +592,36 @@ export interface AuditEvent {
   ts: string;
 }
 
-export function useAuditLogs(from: string, to: string) {
+// Phase 5 — searchable audit history. All filters optional; action is a prefix
+// match ("workload" matches workload.*); q is free text across the whole event.
+export interface AuditQuery {
+  from?: string;
+  to?: string;
+  q?: string;
+  action?: string;
+  actor_id?: string;
+  target_type?: string;
+  target_id?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface AuditSearchResult {
+  items: AuditEvent[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export function useAuditLogs(query: AuditQuery) {
+  const params = new URLSearchParams();
+  Object.entries(query).forEach(([k, v]) => {
+    if (v !== undefined && v !== "") params.set(k, String(v));
+  });
+  const qs = params.toString();
   return useQuery({
-    queryKey: ["audit-logs", from, to],
-    queryFn: () =>
-      api<AuditEvent[]>(
-        `/audit-logs?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-      ),
+    queryKey: ["audit-logs", qs],
+    queryFn: () => api<AuditSearchResult>(`/audit-logs${qs ? `?${qs}` : ""}`),
     refetchInterval: 5_000,
   });
 }

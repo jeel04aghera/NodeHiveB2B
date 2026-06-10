@@ -9,9 +9,31 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type ServiceImpl struct{ db *pgxpool.Pool }
+type ServiceImpl struct {
+	db *pgxpool.Pool
+	// rawRetention mirrors RetentionPolicy.RawMetrics so reads know where raw
+	// samples end and hourly rollups begin.
+	rawRetention time.Duration
+}
 
-func NewService(db *pgxpool.Pool) Service { return &ServiceImpl{db: db} }
+type Option func(*ServiceImpl)
+
+// WithRawRetention aligns the read-side raw/rollup split with the retention sweep.
+func WithRawRetention(d time.Duration) Option {
+	return func(s *ServiceImpl) {
+		if d > 0 {
+			s.rawRetention = d
+		}
+	}
+}
+
+func NewService(db *pgxpool.Pool, opts ...Option) Service {
+	s := &ServiceImpl{db: db, rawRetention: DefaultRetention().RawMetrics}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
 
 func (s *ServiceImpl) Ingest(ctx context.Context, orgID uuid.UUID, samples []Sample) error {
 	if len(samples) == 0 {
@@ -64,23 +86,38 @@ func (s *ServiceImpl) Utilization(ctx context.Context, orgID uuid.UUID, q UtilQu
 	bucketSQL := fmt.Sprintf("date_trunc('minute', ts) + (EXTRACT(MINUTE FROM ts)::int / %d) * interval '%d minutes'",
 		int(interval.Minutes()), int(interval.Minutes()))
 
+	// Raw samples exist only inside the retention window; older history lives in
+	// gpu_metrics_hourly (weighted by sample_count). The boundary matches the
+	// retention sweep's rollup cutoff, so the union has no gap and no overlap.
+	boundary := time.Now().Add(-s.rawRetention).Truncate(time.Hour)
+
 	var whereExtra string
-	args := []any{orgID, q.From, q.To}
+	args := []any{orgID, q.From, q.To, boundary}
 	switch q.Scope {
 	case "node":
-		whereExtra = " AND node_id=$4"
+		whereExtra = " AND node_id=$5"
 		args = append(args, q.ID)
 	case "gpu":
-		whereExtra = " AND gpu_id=$4"
+		whereExtra = " AND gpu_id=$5"
 		args = append(args, q.ID)
 	}
 
 	query := fmt.Sprintf(`
-		SELECT %s AS bucket, avg(util_pct), avg(mem_used_mb::float / NULLIF(
-			(SELECT memory_mb FROM gpus WHERE id=gpu_id LIMIT 1),0)*100)
-		  FROM gpu_metrics
-		 WHERE org_id=$1 AND ts BETWEEN $2 AND $3%s
-		 GROUP BY bucket ORDER BY bucket`, bucketSQL, whereExtra)
+		WITH pts AS (
+			SELECT ts, util_pct::float AS u, mem_used_mb::float AS mem, gpu_id, 1::float AS w
+			  FROM gpu_metrics
+			 WHERE org_id=$1 AND ts BETWEEN $2 AND $3 AND ts >= $4%s
+			UNION ALL
+			SELECT hour_ts, avg_util_pct::float, avg_mem_used_mb::float, gpu_id, sample_count::float
+			  FROM gpu_metrics_hourly
+			 WHERE org_id=$1 AND hour_ts BETWEEN $2 AND $3 AND hour_ts < $4%s
+		)
+		SELECT %s AS bucket,
+		       sum(u*w)/NULLIF(sum(w),0),
+		       sum(mem / NULLIF((SELECT memory_mb FROM gpus WHERE id=pts.gpu_id LIMIT 1),0) * 100 * w)
+		           / NULLIF(sum(w),0)
+		  FROM pts
+		 GROUP BY bucket ORDER BY bucket`, whereExtra, whereExtra, bucketSQL)
 
 	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
@@ -90,15 +127,15 @@ func (s *ServiceImpl) Utilization(ctx context.Context, orgID uuid.UUID, q UtilQu
 	var out []Point
 	for rows.Next() {
 		var p Point
-		var util, mem *float32
+		var util, mem *float64
 		if err := rows.Scan(&p.TS, &util, &mem); err != nil {
 			return nil, err
 		}
 		if util != nil {
-			p.UtilPct = *util
+			p.UtilPct = float32(*util)
 		}
 		if mem != nil {
-			p.MemPct = *mem
+			p.MemPct = float32(*mem)
 		}
 		out = append(out, p)
 	}

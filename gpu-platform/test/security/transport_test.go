@@ -81,7 +81,7 @@ func TestAgentTransportTLS(t *testing.T) {
 		t.Fatalf("token: %v", err)
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	wlSvc := workloads.NewService(pool, agentgw.NewAgentDispatcher(agentgw.GlobalDispatcher), billing.NewService(pool))
+	wlSvc := workloads.NewService(pool, agentgw.NewDeliveryEngine(pool, agentgw.GlobalDispatcher, slog.Default()), billing.NewService(pool))
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -91,7 +91,7 @@ func TestAgentTransportTLS(t *testing.T) {
 		grpc.ChainStreamInterceptor(agentgw.StreamAuthInterceptor(nodeSvc)))
 	agentv1.RegisterAgentServiceServer(grpcSrv, agentgw.NewServer(
 		nodeSvc, inventory.NewService(pool), telemetry.NewService(pool), wlSvc,
-		audit.NewService(pool), agentgw.GlobalDispatcher, log))
+		audit.NewService(pool), agentgw.GlobalDispatcher, agentgw.NewDeliveryEngine(pool, agentgw.GlobalDispatcher, log), log))
 	go func() { _ = grpcSrv.Serve(lis) }()
 	t.Cleanup(grpcSrv.Stop)
 	addr := lis.Addr().String()

@@ -49,6 +49,19 @@ func containerName(workloadID string) string {
 
 func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) (Status, error) {
 	name := containerName(spec.WorkloadID)
+
+	// Idempotency (Phase 4): launch commands are delivered at-least-once, so this
+	// container may already exist. Running → report it as-is (recovered endpoints)
+	// instead of failing on the docker name conflict; exited → remove the corpse
+	// and launch fresh.
+	if exists, running := e.containerExists(ctx, name); exists {
+		if running {
+			st := e.recoverStatus(ctx, name, spec.WorkloadID)
+			return st, nil
+		}
+		_ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run()
+	}
+
 	sshPass := spec.SSHPassword
 	if sshPass == "" {
 		sshPass = spec.Env["SSH_PASSWORD"]
@@ -285,6 +298,82 @@ func randToken() string {
 		return "nodehive"
 	}
 	return hex.EncodeToString(b)
+}
+
+// containerExists reports whether the named container exists at all, and if so
+// whether it is currently running.
+func (e *DockerExecutor) containerExists(ctx context.Context, name string) (exists, running bool) {
+	out, err := exec.CommandContext(ctx, "docker", "inspect",
+		"--format={{.State.Running}}", name).Output()
+	if err != nil {
+		return false, false
+	}
+	return true, strings.TrimSpace(string(out)) == "true"
+}
+
+// recoverStatus rebuilds a running container's Status (endpoints, credentials)
+// from docker inspect — used when a duplicate launch lands or for reconciliation
+// after a reconnect, where the original LaunchSpec is no longer in hand.
+func (e *DockerExecutor) recoverStatus(ctx context.Context, name, workloadID string) Status {
+	st := Status{WorkloadID: workloadID, State: "running",
+		Message: "recovered running container"}
+	envOut, _ := exec.CommandContext(ctx, "docker", "inspect",
+		"--format={{range .Config.Env}}{{println .}}{{end}}", name).Output()
+	var jToken string
+	for _, line := range strings.Split(string(envOut), "\n") {
+		if v, ok := strings.CutPrefix(line, "SSH_PASSWORD="); ok {
+			st.SSHPassword = strings.TrimSpace(v)
+		}
+		if v, ok := strings.CutPrefix(line, "JUPYTER_TOKEN="); ok {
+			jToken = strings.TrimSpace(v)
+		}
+	}
+	if p := e.inspectPort(ctx, name, "22/tcp"); p != "" {
+		st.SSHEndpoint = e.hostAddr + ":" + p
+	}
+	if p := e.inspectPort(ctx, name, "8888/tcp"); p != "" {
+		ep := e.hostAddr + ":" + p
+		if jToken != "" {
+			ep += "/lab?token=" + jToken
+		}
+		st.JupyterEndpoint = ep
+	}
+	return st
+}
+
+// List enumerates NodeHive-labelled containers (running or exited) for
+// reconciliation: after a reconnect the agent reports what is ACTUALLY on the box,
+// so the control plane can repair state it lost or got wrong while disconnected.
+func (e *DockerExecutor) List(ctx context.Context) ([]Status, error) {
+	out, err := exec.CommandContext(ctx, "docker", "ps", "-a",
+		"--filter", "label=nodehive.workload_id",
+		"--format", `{{.Names}}|{{.Label "nodehive.workload_id"}}|{{.State}}`).Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker ps: %w", err)
+	}
+	var statuses []Status
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 3)
+		if len(parts) != 3 || parts[1] == "" {
+			continue
+		}
+		name, workloadID, state := parts[0], parts[1], parts[2]
+		if state == "running" {
+			statuses = append(statuses, e.recoverStatus(ctx, name, workloadID))
+			continue
+		}
+		logs, _ := e.Logs(ctx, workloadID, 50)
+		statuses = append(statuses, Status{
+			WorkloadID: workloadID,
+			State:      "stopped",
+			Message:    "container found " + state + " on reconcile",
+			Logs:       logs,
+		})
+	}
+	return statuses, nil
 }
 
 // containerState reports whether the named container is running and its exit code.

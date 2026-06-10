@@ -75,6 +75,34 @@ type BillingConfig struct {
 	AllowSelfTopup bool
 }
 
+// RetentionConfig bounds time-series growth (Phase 4). Durations accept Go syntax
+// ("336h" = 14 days). Raw metrics are rolled up to hourly aggregates before
+// deletion; billing tables are never touched by retention.
+type RetentionConfig struct {
+	RawMetrics    time.Duration // METRICS_RETENTION        (default 336h  = 14d)
+	RollupMetrics time.Duration // METRICS_ROLLUP_RETENTION (default 8760h = 365d)
+	Heartbeats    time.Duration // HEARTBEAT_RETENTION      (default 168h  = 7d)
+	Events        time.Duration // EVENT_RETENTION          (default 2160h = 90d)
+}
+
+// ObsConfig is the operations & observability surface (Phase 5).
+type ObsConfig struct {
+	// LogFormat: "json" (default in production — one object per line for log drains)
+	// or "text" (default in dev).
+	LogFormat string
+	// LogLevel: debug | info (default) | warn | error.
+	LogLevel string
+	// SentryDSN enables error monitoring; empty disables it entirely.
+	SentryDSN string
+	// MetricsToken protects GET /metrics. In production the endpoint requires
+	// Authorization: Bearer <token> and is disabled (404) when unset, so fleet
+	// state is never exposed to the public edge by default. Dev serves it openly.
+	MetricsToken string
+	// Version is reported in health, metrics build info and Sentry releases.
+	// VERSION env, falling back to the platform's commit sha when present.
+	Version string
+}
+
 type Config struct {
 	Env                string // "development" or "production" (default). Gates dev bootstrap + secret checks.
 	DB                 DBConfig
@@ -84,15 +112,17 @@ type Config struct {
 	Google             GoogleOAuthConfig
 	Email              EmailConfig
 	Billing            BillingConfig
+	Retention          RetentionConfig
+	Obs                ObsConfig
 	AppBaseURL         string   // frontend origin the OAuth callback redirects back to
 	CORSAllowedOrigins []string // explicit allow-list; empty => permissive "*" (dev only, no credentials)
 	// AgentPublicGRPCAddr is the host:port agents reach the gRPC gateway at (e.g. the
 	// Railway TCP proxy endpoint). Baked into install.sh AND used as the TLS server
 	// certificate's SAN, so the agent's hostname verification matches what it dials.
 	AgentPublicGRPCAddr string
-	DevOrgSlug         string   // org that dev nodes enroll into (matches scripts/seed_dev.sql)
-	DevEnrollmentToken string   // if set AND dev mode, control plane seeds this token on startup
-	DevBootstrapAdmin  string   // email:password to seed on first run (dev mode only)
+	DevOrgSlug          string // org that dev nodes enroll into (matches scripts/seed_dev.sql)
+	DevEnrollmentToken  string // if set AND dev mode, control plane seeds this token on startup
+	DevBootstrapAdmin   string // email:password to seed on first run (dev mode only)
 }
 
 func Load() (Config, error) {
@@ -117,12 +147,18 @@ func Load() (Config, error) {
 			ResendAPIKey: env("RESEND_API_KEY", ""),
 			FromEmail:    env("INVITE_FROM_EMAIL", ""),
 		},
+		Retention: RetentionConfig{
+			RawMetrics:    envDur("METRICS_RETENTION", 14*24*time.Hour),
+			RollupMetrics: envDur("METRICS_ROLLUP_RETENTION", 365*24*time.Hour),
+			Heartbeats:    envDur("HEARTBEAT_RETENTION", 7*24*time.Hour),
+			Events:        envDur("EVENT_RETENTION", 90*24*time.Hour),
+		},
 		AppBaseURL:          strings.TrimRight(env("APP_BASE_URL", ""), "/"),
 		CORSAllowedOrigins:  splitNonEmpty(env("CORS_ALLOWED_ORIGINS", "")),
 		AgentPublicGRPCAddr: env("AGENT_PUBLIC_GRPC_ADDR", ""),
-		DevOrgSlug:         env("DEV_ORG_SLUG", "dev"),
-		DevEnrollmentToken: env("DEV_ENROLLMENT_TOKEN", "dev-enroll-token"),
-		DevBootstrapAdmin:  env("DEV_BOOTSTRAP_ADMIN", "admin@dev.local:admin123"),
+		DevOrgSlug:          env("DEV_ORG_SLUG", "dev"),
+		DevEnrollmentToken:  env("DEV_ENROLLMENT_TOKEN", "dev-enroll-token"),
+		DevBootstrapAdmin:   env("DEV_BOOTSTRAP_ADMIN", "admin@dev.local:admin123"),
 	}
 	// Mode-dependent defaults (dev keeps the frictionless local experience;
 	// production fails closed). gRPC: plaintext is the dev default only — production
@@ -136,6 +172,17 @@ func Load() (Config, error) {
 		Enforce:        envBool("BILLING_ENFORCE", true),
 		WelcomeCredit:  envFloat("WELCOME_CREDIT", devWelcome),
 		AllowSelfTopup: envBool("BILLING_ALLOW_SELF_TOPUP", c.IsDev()),
+	}
+	logFormat := "json"
+	if c.IsDev() {
+		logFormat = "text"
+	}
+	c.Obs = ObsConfig{
+		LogFormat:    strings.ToLower(env("LOG_FORMAT", logFormat)),
+		LogLevel:     strings.ToLower(env("LOG_LEVEL", "info")),
+		SentryDSN:    env("SENTRY_DSN", ""),
+		MetricsToken: env("METRICS_TOKEN", ""),
+		Version:      env("VERSION", env("RAILWAY_GIT_COMMIT_SHA", "dev")),
 	}
 	return c, c.Validate()
 }

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -49,7 +50,7 @@ func TestBillingAdmissionAndAbuse(t *testing.T) {
 	billingSvc := billing.NewService(pool) // enforcement defaults ON
 	router := httpapi.NewRouter(
 		nodes.NewService(nodes.NewRepo(pool)), idSvc, inventory.NewService(pool),
-		workloads.NewService(pool, agentgw.NewAgentDispatcher(agentgw.GlobalDispatcher), billingSvc),
+		workloads.NewService(pool, agentgw.NewDeliveryEngine(pool, agentgw.GlobalDispatcher, slog.Default()), billingSvc),
 		telemetry.NewService(pool), billingSvc, audit.NewService(pool),
 		policy.NewService(pool), ops.New(pool),
 	) // note: no WithSelfTopup → endpoint disabled, the secure default

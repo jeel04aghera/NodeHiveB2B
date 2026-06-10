@@ -70,7 +70,7 @@ func TestWorkloadCrossOrgIsolation(t *testing.T) {
 	idSvc := identity.NewService(pool, "test-secret-thirtytwo-chars-long!!", time.Hour)
 	nodeSvc := nodes.NewService(nodes.NewRepo(pool))
 	billingSvc := billing.NewService(pool)
-	wlSvc := workloads.NewService(pool, agentgw.NewAgentDispatcher(agentgw.GlobalDispatcher), billingSvc)
+	wlSvc := workloads.NewService(pool, agentgw.NewDeliveryEngine(pool, agentgw.GlobalDispatcher, slog.Default()), billingSvc)
 	router := httpapi.NewRouter(
 		nodeSvc, idSvc, inventory.NewService(pool), wlSvc,
 		telemetry.NewService(pool), billingSvc, audit.NewService(pool),

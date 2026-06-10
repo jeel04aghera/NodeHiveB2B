@@ -57,6 +57,7 @@ func (a *API) googleCallback(w http.ResponseWriter, r *http.Request) {
 	// Open a refresh session for this device too (same as password login) so Google
 	// users get rotation / device management. The refresh cookie rides the redirect.
 	a.startSession(w, r, user.ID)
+	a.userEvent(r, user, "auth.login", "user", user.ID.String(), map[string]any{"method": "google"})
 	// Deliver the token to the SPA. Cross-origin: hand it back in the URL fragment
 	// (never sent to servers/logs); the SPA reads it and decides onboarding vs dashboard.
 	if a.appBaseURL != "" {
@@ -94,6 +95,8 @@ func (a *API) onboardingCreateOrg(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "validation", err.Error())
 		return
 	}
+	a.userEvent(r, user, "org.create", "organization", user.OrgID.String(),
+		map[string]any{"org_name": body.OrgName})
 	writeJSON(w, 201, map[string]any{"token": token, "user": userResponse(user)})
 }
 

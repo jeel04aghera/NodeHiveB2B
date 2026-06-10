@@ -7,7 +7,6 @@ import (
 
 	"github.com/google/uuid"
 
-	agentv1 "github.com/nodehive/gpu-platform/gen/go/agent/v1"
 	"github.com/nodehive/gpu-platform/internal/domain"
 )
 
@@ -72,10 +71,18 @@ type Service interface {
 	// F3 — queue.
 	ListQueue(ctx context.Context, orgID uuid.UUID) (QueueStats, error)
 	CancelQueued(ctx context.Context, id uuid.UUID) error
+	// PromoteQueued starts queued workloads in one org as capacity allows;
+	// PromoteAllQueued does it fleet-wide (periodic sweep — promotion survives
+	// control-plane restarts because the queue lives in the database).
+	PromoteQueued(ctx context.Context, orgID uuid.UUID) (int, error)
+	PromoteAllQueued(ctx context.Context) (int, error)
 }
 
-// Dispatcher sends typed ServerMessages to connected agents.
-// Using the concrete proto type avoids the silent-drop bug (any → type assertion failure).
+// Dispatcher is the workloads → agent-gateway seam. Commands are durable rows in
+// the agent_commands outbox (written in the same transaction as the workload state
+// they implement); Nudge tells the delivery engine "there may be new deliverable
+// rows for this node" and never blocks. Losing a nudge is safe — the engine's
+// periodic tick redelivers anything still due.
 type Dispatcher interface {
-	Send(ctx context.Context, nodeID uuid.UUID, msg *agentv1.ServerMessage) error
+	Nudge(nodeID uuid.UUID)
 }

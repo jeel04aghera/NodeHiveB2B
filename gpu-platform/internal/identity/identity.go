@@ -19,6 +19,9 @@ type Service interface {
 	// Register creates a brand-new organization with an admin user and returns a session.
 	Register(ctx context.Context, orgName, email, name, password string) (token string, user domain.User, err error)
 	Authenticate(ctx context.Context, token string) (domain.User, error)
+	// OrgIDByEmail resolves the org a user account belongs to (uuid.Nil when the email
+	// is unknown or pre-onboarding). Used to scope failed-login audit events.
+	OrgIDByEmail(ctx context.Context, email string) (uuid.UUID, error)
 	// UpsertGoogleUser logs in / links / creates a user from a verified Google identity.
 	// The returned user may have OrgID == uuid.Nil (onboarding required).
 	UpsertGoogleUser(ctx context.Context, sub, email, name, avatar string, emailVerified bool) (token string, user domain.User, err error)
@@ -54,8 +57,10 @@ type Service interface {
 	// RevokeAllSessions revokes every active session for a user, optionally keeping one
 	// (the caller's current session) so "log out everywhere else" leaves them signed in.
 	RevokeAllSessions(ctx context.Context, userID uuid.UUID, exceptSessionID *uuid.UUID) error
-	// RevokeSessionByRefresh revokes the session identified by a raw refresh token (logout).
-	RevokeSessionByRefresh(ctx context.Context, rawRefresh string) error
+	// RevokeSessionByRefresh revokes the session identified by a raw refresh token
+	// (logout). Returns the session's user and org (uuid.Nil when no active session
+	// matched) so the caller can attribute the logout in the audit trail.
+	RevokeSessionByRefresh(ctx context.Context, rawRefresh string) (userID, orgID uuid.UUID, err error)
 	// SessionIDByRefresh resolves the session id for a raw refresh token (current-session marker).
 	SessionIDByRefresh(ctx context.Context, rawRefresh string) (uuid.UUID, error)
 

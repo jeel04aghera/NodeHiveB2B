@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -38,7 +39,7 @@ func TestWorkloadSecretsAndRateLimit(t *testing.T) {
 	billingSvc := billing.NewService(pool)
 	router := httpapi.NewRouter(
 		nodes.NewService(nodes.NewRepo(pool)), idSvc, inventory.NewService(pool),
-		workloads.NewService(pool, agentgw.NewAgentDispatcher(agentgw.GlobalDispatcher), billingSvc),
+		workloads.NewService(pool, agentgw.NewDeliveryEngine(pool, agentgw.GlobalDispatcher, slog.Default()), billingSvc),
 		telemetry.NewService(pool), billingSvc, audit.NewService(pool),
 		policy.NewService(pool), ops.New(pool),
 	)

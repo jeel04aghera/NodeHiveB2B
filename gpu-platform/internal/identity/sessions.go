@@ -161,16 +161,24 @@ func (s *ServiceImpl) RevokeAllSessions(ctx context.Context, userID uuid.UUID, e
 	return err
 }
 
-// RevokeSessionByRefresh revokes the session a raw refresh token belongs to (logout).
-// Unknown/already-revoked tokens are a no-op (idempotent).
-func (s *ServiceImpl) RevokeSessionByRefresh(ctx context.Context, rawRefresh string) error {
+// RevokeSessionByRefresh revokes the session a raw refresh token belongs to (logout)
+// and returns its user + org for audit attribution. Unknown/already-revoked tokens
+// are a no-op (idempotent) returning zero UUIDs.
+func (s *ServiceImpl) RevokeSessionByRefresh(ctx context.Context, rawRefresh string) (uuid.UUID, uuid.UUID, error) {
 	if strings.TrimSpace(rawRefresh) == "" {
-		return nil
+		return uuid.Nil, uuid.Nil, nil
 	}
-	_, err := s.db.Exec(ctx,
-		`UPDATE user_sessions SET revoked_at = now()
-		   WHERE refresh_token_hash = $1 AND revoked_at IS NULL`, hashToken(rawRefresh))
-	return err
+	var userID, orgID uuid.UUID
+	err := s.db.QueryRow(ctx,
+		`UPDATE user_sessions s SET revoked_at = now()
+		   FROM users u
+		  WHERE s.refresh_token_hash = $1 AND s.revoked_at IS NULL AND u.id = s.user_id
+		  RETURNING s.user_id, coalesce(u.org_id, '00000000-0000-0000-0000-000000000000'::uuid)`,
+		hashToken(rawRefresh)).Scan(&userID, &orgID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, uuid.Nil, nil
+	}
+	return userID, orgID, err
 }
 
 // SessionIDByRefresh resolves the active session id for a raw refresh token, used to mark

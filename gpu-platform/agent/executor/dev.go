@@ -61,6 +61,16 @@ func (e *DevExecutor) Status(ctx context.Context, workloadID string) (Status, er
 	return Status{WorkloadID: workloadID, State: "stopped"}, nil
 }
 
+func (e *DevExecutor) List(ctx context.Context) ([]Status, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]Status, 0, len(e.running))
+	for _, st := range e.running {
+		out = append(out, st)
+	}
+	return out, nil
+}
+
 func (e *DevExecutor) Logs(ctx context.Context, workloadID string, tail int) (string, error) {
 	return fmt.Sprintf(
 		"[dev executor] workload %s\n%s  container started\n%s  GPU bound, ready\n[dev executor] simulated output — no real container\n",

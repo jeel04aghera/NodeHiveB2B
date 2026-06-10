@@ -47,6 +47,9 @@ type Service interface {
 	Ingest(ctx context.Context, orgID uuid.UUID, samples []Sample) error
 	Utilization(ctx context.Context, orgID uuid.UUID, q UtilQuery) ([]Point, error)
 	FleetSummary(ctx context.Context, orgID uuid.UUID) (Summary, error)
+	// SweepRetention rolls raw samples into hourly aggregates and ages out
+	// time-series exhaust (Phase 4 — metrics retention). Billing tables untouched.
+	SweepRetention(ctx context.Context, p RetentionPolicy) (RetentionStats, error)
 }
 
 type Store interface {

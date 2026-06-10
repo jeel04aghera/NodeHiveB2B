@@ -82,6 +82,8 @@ func (a *API) changeMemberRole(w http.ResponseWriter, r *http.Request) {
 		writeMembershipErr(w, err)
 		return
 	}
+	a.userEvent(r, u, "member.role_change", "user", target.String(),
+		map[string]any{"new_role": body.Role})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -96,6 +98,7 @@ func (a *API) removeMember(w http.ResponseWriter, r *http.Request) {
 		writeMembershipErr(w, err)
 		return
 	}
+	a.userEvent(r, u, "member.remove", "user", target.String(), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -127,6 +130,8 @@ func (a *API) createInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.dispatchInviteEmail(inv, raw) // async; creation already succeeded
+	a.userEvent(r, u, "invitation.create", "invitation", inv.ID.String(),
+		map[string]any{"email": body.Email, "role": string(inv.Role)})
 	// In dev (email disabled) we still return the shareable invite token + accept link so
 	// the admin can deliver it manually. In prod the email carries the link.
 	writeJSON(w, 201, a.inviteResponse(inv, raw))
@@ -156,6 +161,8 @@ func (a *API) resendInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.dispatchInviteEmail(inv, raw) // re-send asynchronously
+	a.userEvent(r, u, "invitation.resend", "invitation", inv.ID.String(),
+		map[string]any{"email": string(inv.Email)})
 	writeJSON(w, 200, a.inviteResponse(inv, raw))
 }
 
@@ -201,6 +208,8 @@ func (a *API) leaveOrg(w http.ResponseWriter, r *http.Request) {
 		writeMembershipErr(w, err)
 		return
 	}
+	// Attributed to the org being left (u.OrgID, captured before the leave).
+	a.userEvent(r, u, "org.leave", "organization", u.OrgID.String(), nil)
 	// The user is now pre-onboarding; hand back a fresh org-less token for the SPA to adopt.
 	writeJSON(w, 200, map[string]any{"token": token, "user": userResponse(user)})
 }
@@ -223,6 +232,7 @@ func (a *API) transferOwnership(w http.ResponseWriter, r *http.Request) {
 		writeMembershipErr(w, err)
 		return
 	}
+	a.userEvent(r, u, "org.transfer_ownership", "user", target.String(), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -237,6 +247,7 @@ func (a *API) revokeInvitation(w http.ResponseWriter, r *http.Request) {
 		writeMembershipErr(w, err)
 		return
 	}
+	a.userEvent(r, u, "invitation.revoke", "invitation", id.String(), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -274,6 +285,8 @@ func (a *API) acceptInvitation(w http.ResponseWriter, r *http.Request) {
 		writeMembershipErr(w, err)
 		return
 	}
+	// Attributed to the org the user just joined (user.OrgID is set post-accept).
+	a.userEvent(r, user, "invitation.accept", "organization", user.OrgID.String(), nil)
 	writeJSON(w, 200, map[string]any{"token": token, "user": userResponse(user)})
 }
 
@@ -306,6 +319,8 @@ func (a *API) createJoinCode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not create join code")
 		return
 	}
+	a.userEvent(r, u, "join_code.create", "join_code", "",
+		map[string]any{"description": body.Description, "max_uses": body.MaxUses, "ttl_days": body.TTLDays})
 	writeJSON(w, 201, map[string]any{"code": raw})
 }
 
@@ -320,6 +335,7 @@ func (a *API) revokeJoinCode(w http.ResponseWriter, r *http.Request) {
 		writeMembershipErr(w, err)
 		return
 	}
+	a.userEvent(r, u, "join_code.revoke", "join_code", id.String(), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -338,6 +354,7 @@ func (a *API) joinViaCode(w http.ResponseWriter, r *http.Request) {
 		writeMembershipErr(w, err)
 		return
 	}
+	a.userEvent(r, user, "join_code.join", "organization", user.OrgID.String(), nil)
 	writeJSON(w, 200, map[string]any{"token": token, "user": userResponse(user)})
 }
 
@@ -363,5 +380,7 @@ func (a *API) registerPending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.startSession(w, r, user.ID) // additive: also sets the refresh cookie
+	a.userEvent(r, user, "auth.register", "user", user.ID.String(),
+		map[string]any{"method": "password", "pending": true})
 	writeJSON(w, 201, map[string]any{"token": token, "user": userResponse(user)})
 }

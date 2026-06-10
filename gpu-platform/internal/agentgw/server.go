@@ -32,6 +32,7 @@ type Server struct {
 	workloadsSvc workloads.Service
 	auditSvc     audit.Service
 	dispatcher   *Dispatcher
+	delivery     *DeliveryEngine
 	log          *slog.Logger
 }
 
@@ -42,6 +43,7 @@ func NewServer(
 	workloadsSvc workloads.Service,
 	auditSvc audit.Service,
 	dispatcher *Dispatcher,
+	delivery *DeliveryEngine,
 	log *slog.Logger,
 ) *Server {
 	return &Server{
@@ -51,6 +53,7 @@ func NewServer(
 		workloadsSvc: workloadsSvc,
 		auditSvc:     auditSvc,
 		dispatcher:   dispatcher,
+		delivery:     delivery,
 		log:          log,
 	}
 }
@@ -103,7 +106,7 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessage, a
 	}
 
 	// Register dispatch channel so the control plane can push commands.
-	cmdCh := s.dispatcher.Register(ai.NodeID)
+	cmdCh, kicked := s.dispatcher.Register(ai.NodeID)
 	s.log.Info("agent connected", "node_id", ai.NodeID)
 
 	defer func() {
@@ -115,6 +118,12 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessage, a
 		}
 	}()
 
+	// Reconnect recovery: any command that was enqueued or in flight while this
+	// agent was away is still in the outbox — make it due now and deliver it.
+	if s.delivery != nil {
+		go s.delivery.OnConnect(context.Background(), ai.NodeID)
+	}
+
 	// Fan-out: send queued commands to the agent.
 	go func() {
 		for msg := range cmdCh {
@@ -125,13 +134,41 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessage, a
 		}
 	}()
 
-	for {
-		msg, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return nil
+	// Recv in a goroutine so the handler can also honor a Kick (node removal):
+	// returning from this handler is the only way to close a server stream.
+	type recvMsg struct {
+		msg *agentv1.AgentMessage
+		err error
+	}
+	recvCh := make(chan recvMsg)
+	go func() {
+		for {
+			m, err := stream.Recv()
+			select {
+			case recvCh <- recvMsg{m, err}:
+			case <-kicked:
+				return
+			}
+			if err != nil {
+				return
+			}
 		}
-		if err != nil {
-			return err
+	}()
+
+	for {
+		var msg *agentv1.AgentMessage
+		select {
+		case <-kicked:
+			s.log.Info("agent stream kicked (node removed)", "node_id", ai.NodeID)
+			return status.Error(codes.PermissionDenied, "node removed")
+		case rm := <-recvCh:
+			if errors.Is(rm.err, io.EOF) {
+				return nil
+			}
+			if rm.err != nil {
+				return rm.err
+			}
+			msg = rm.msg
 		}
 
 		switch p := msg.GetPayload().(type) {
@@ -153,6 +190,13 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessage, a
 			go s.handleWorkloadStatus(stream.Context(), ai, p.WorkloadStatus)
 
 		case *agentv1.AgentMessage_CommandResult:
+			// Finalize the outbox row: 'acked' (delivered + executed) or 'failed'
+			// (delivered, agent reports it could not execute). Either way the
+			// command's fate is now explicit — no silent drops.
+			if s.delivery != nil {
+				s.delivery.Ack(stream.Context(), p.CommandResult.GetCommandId(),
+					p.CommandResult.GetOk(), p.CommandResult.GetError())
+			}
 			s.log.Debug("command result", "node_id", ai.NodeID,
 				"cmd", p.CommandResult.GetCommandId(), "ok", p.CommandResult.GetOk())
 		}
@@ -320,14 +364,6 @@ func enrollError(err error) error {
 	}
 }
 
-// Expose dispatcher interface for workloads package.
-// AgentDispatcher implements workloads.Dispatcher by routing to the in-memory stream map.
-type AgentDispatcher struct{ d *Dispatcher }
-
-func NewAgentDispatcher(d *Dispatcher) *AgentDispatcher { return &AgentDispatcher{d: d} }
-
-// Send satisfies workloads.Dispatcher. The message is now always a *agentv1.ServerMessage
-// (the stub launchCmd/stopCmd types were removed), so no type assertion needed.
-func (a *AgentDispatcher) Send(ctx context.Context, nodeID uuid.UUID, msg *agentv1.ServerMessage) error {
-	return a.d.Send(ctx, nodeID, msg)
-}
+// workloads.Dispatcher is now implemented by the DeliveryEngine (delivery.go):
+// commands are durable outbox rows and Nudge wakes the deliverer, replacing the
+// old fire-and-forget AgentDispatcher.Send.

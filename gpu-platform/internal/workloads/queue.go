@@ -2,6 +2,7 @@ package workloads
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -104,65 +105,146 @@ func (s *ServiceImpl) CancelQueued(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// tryPromoteQueue attempts to start the oldest queued workload in an org now that
-// capacity may have freed. Called after a workload stops/fails. Best-effort.
-func (s *ServiceImpl) tryPromoteQueue(ctx context.Context, orgID uuid.UUID) {
-	var (
-		id      uuid.UUID
-		gpuType string
-		count   int
-		deptID  *uuid.UUID
-		projID  *uuid.UUID
-	)
-	err := s.db.QueryRow(ctx,
+// PromoteQueued starts as many queued workloads in an org as current capacity
+// allows, oldest first. It is safe to call from anywhere, any number of times:
+// a per-org advisory lock serializes concurrent promoters (terminal-status nudges
+// racing the periodic sweep), and each promotion claims its GPUs under the same
+// FOR UPDATE SKIP LOCKED placement transaction Launch uses. Returns the number of
+// workloads promoted.
+//
+// Entries whose GPU type/count cannot currently be satisfied are skipped rather
+// than blocking the queue head — a later entry with a satisfiable request may
+// start first (documented FIFO-with-skip semantics).
+func (s *ServiceImpl) PromoteQueued(ctx context.Context, orgID uuid.UUID) (int, error) {
+	rows, err := s.db.Query(ctx,
 		`SELECT id, requested_gpu_type, requested_gpu_count, department_id, project_id
 		   FROM workloads
-		  WHERE org_id=$1 AND status='queued' ORDER BY COALESCE(queued_at, created_at) LIMIT 1`,
-		orgID).Scan(&id, &gpuType, &count, &deptID, &projID)
+		  WHERE org_id=$1 AND status='queued' ORDER BY COALESCE(queued_at, created_at)`, orgID)
 	if err != nil {
-		return // nothing queued
+		return 0, err
 	}
-	// Re-check admission at promotion time: the org's balance/budget may have been
-	// exhausted while the workload waited. It stays queued until credit returns.
-	if s.billing != nil {
-		if err := s.billing.AuthorizeLaunch(ctx, orgID, deptID, projID); err != nil {
-			return
+	type cand struct {
+		id             uuid.UUID
+		gpuType        string
+		count          int
+		deptID, projID *uuid.UUID
+	}
+	var cands []cand
+	for rows.Next() {
+		var c cand
+		if err := rows.Scan(&c.id, &c.gpuType, &c.count, &c.deptID, &c.projID); err != nil {
+			rows.Close()
+			return 0, err
 		}
+		cands = append(cands, c)
 	}
-	gpuIDs, nodeID, err := s.place(ctx, orgID, gpuType, count)
-	if err != nil {
-		return // still no capacity
+	rows.Close()
+	if len(cands) == 0 {
+		return 0, nil
 	}
 
-	// Attach GPUs and flip to pending, then dispatch — mirrors Launch's tail.
+	promoted := 0
+	for _, c := range cands {
+		// Re-check admission at promotion time: the org's balance/budget may have
+		// been exhausted while the workload waited. It stays queued until credit
+		// returns; admission is org-wide, so stop scanning on refusal.
+		if s.billing != nil {
+			if err := s.billing.AuthorizeLaunch(ctx, orgID, c.deptID, c.projID); err != nil {
+				break
+			}
+		}
+		ok, err := s.promoteOne(ctx, orgID, c.id, c.gpuType, c.count)
+		if err != nil {
+			return promoted, err
+		}
+		if ok {
+			promoted++
+		}
+	}
+	return promoted, nil
+}
+
+// promoteOne attempts to place and start a single queued workload. The whole
+// promotion — advisory lock, CAS on status='queued', GPU claim, launch command —
+// is one transaction, mirroring Launch.
+func (s *ServiceImpl) promoteOne(ctx context.Context, orgID, id uuid.UUID, gpuType string, count int) (bool, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return
+		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Per-org promotion lock: two promoters for the same org serialize here, so a
+	// queued workload can't be claimed twice (the status CAS below is the backstop).
 	if _, err := tx.Exec(ctx,
-		`UPDATE workloads SET status='pending', stage='preparing', node_id=$2 WHERE id=$1 AND status='queued'`,
-		id, nodeID); err != nil {
-		return
+		`SELECT pg_advisory_xact_lock(hashtext('nodehive.queue.' || $1::text))`, orgID); err != nil {
+		return false, err
 	}
-	for _, gid := range gpuIDs {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO workload_gpus (workload_id, gpu_id) VALUES ($1,$2)
-			 ON CONFLICT DO NOTHING`, id, gid); err != nil {
-			return
-		}
-		if _, err := tx.Exec(ctx, `UPDATE gpus SET status='in_use' WHERE id=$1`, gid); err != nil {
-			return
-		}
+
+	placed, err := s.placeAndAttach(ctx, tx, orgID, id, gpuType, count)
+	if errors.Is(err, ErrNoGPUsAvailable) {
+		return false, nil // still no capacity for this entry
+	}
+	if err != nil {
+		return false, err
+	}
+
+	ct, err := tx.Exec(ctx,
+		`UPDATE workloads SET status='pending', stage='preparing', node_id=$2
+		  WHERE id=$1 AND status='queued'`, id, placed.nodeID)
+	if err != nil {
+		return false, err
+	}
+	if ct.RowsAffected() == 0 {
+		return false, nil // cancelled or already promoted under our feet
+	}
+	if err := placed.attach(ctx, tx); err != nil {
+		return false, err
+	}
+	wl, err := s.getByIDTx(ctx, tx, id)
+	if err != nil {
+		return false, err
+	}
+	wl.NodeID = &placed.nodeID
+	if err := s.enqueueLaunch(ctx, tx, wl, placed); err != nil {
+		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return
+		return false, err
 	}
 	_ = s.recordEvent(ctx, id, orgID, "node_selected", "promoted from queue")
+	_ = s.recordEvent(ctx, id, orgID, "preparing", "")
+	s.dispatch.Nudge(placed.nodeID)
+	return true, nil
+}
 
-	wl, err := s.getByID(ctx, id) // system path: this workload's org was just resolved above
+// PromoteAllQueued runs queue promotion for every org with waiting workloads.
+// Called by the periodic queue sweep, which makes promotion crash-safe: a nudge
+// lost to a control-plane restart is retried on the next tick.
+func (s *ServiceImpl) PromoteAllQueued(ctx context.Context) (int, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT DISTINCT org_id FROM workloads WHERE status='queued'`)
 	if err != nil {
-		return
+		return 0, err
 	}
-	go s.sendLaunchCommand(context.Background(), nodeID, wl, gpuIDs)
+	var orgs []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		orgs = append(orgs, id)
+	}
+	rows.Close()
+
+	total := 0
+	for _, org := range orgs {
+		n, err := s.PromoteQueued(ctx, org)
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
 }

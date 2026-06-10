@@ -98,7 +98,7 @@ func TestAgentTrustBoundary(t *testing.T) {
 	// Full gRPC gateway, wired exactly as main.go does.
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	dispatcher := agentgw.GlobalDispatcher
-	wlSvc := workloads.NewService(pool, agentgw.NewAgentDispatcher(dispatcher), billing.NewService(pool))
+	wlSvc := workloads.NewService(pool, agentgw.NewDeliveryEngine(pool, dispatcher, slog.Default()), billing.NewService(pool))
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -106,7 +106,7 @@ func TestAgentTrustBoundary(t *testing.T) {
 	grpcSrv := grpc.NewServer(grpc.ChainStreamInterceptor(agentgw.StreamAuthInterceptor(nodeSvc)))
 	agentv1.RegisterAgentServiceServer(grpcSrv, agentgw.NewServer(
 		nodeSvc, inventory.NewService(pool), telemetry.NewService(pool), wlSvc,
-		audit.NewService(pool), dispatcher, log))
+		audit.NewService(pool), dispatcher, agentgw.NewDeliveryEngine(pool, dispatcher, log), log))
 	go func() { _ = grpcSrv.Serve(lis) }()
 	t.Cleanup(grpcSrv.Stop)
 
