@@ -108,16 +108,26 @@ func (s *ServiceImpl) CancelQueued(ctx context.Context, id uuid.UUID) error {
 // capacity may have freed. Called after a workload stops/fails. Best-effort.
 func (s *ServiceImpl) tryPromoteQueue(ctx context.Context, orgID uuid.UUID) {
 	var (
-		id       uuid.UUID
-		gpuType  string
-		count    int
+		id      uuid.UUID
+		gpuType string
+		count   int
+		deptID  *uuid.UUID
+		projID  *uuid.UUID
 	)
 	err := s.db.QueryRow(ctx,
-		`SELECT id, requested_gpu_type, requested_gpu_count FROM workloads
+		`SELECT id, requested_gpu_type, requested_gpu_count, department_id, project_id
+		   FROM workloads
 		  WHERE org_id=$1 AND status='queued' ORDER BY COALESCE(queued_at, created_at) LIMIT 1`,
-		orgID).Scan(&id, &gpuType, &count)
+		orgID).Scan(&id, &gpuType, &count, &deptID, &projID)
 	if err != nil {
 		return // nothing queued
+	}
+	// Re-check admission at promotion time: the org's balance/budget may have been
+	// exhausted while the workload waited. It stays queued until credit returns.
+	if s.billing != nil {
+		if err := s.billing.AuthorizeLaunch(ctx, orgID, deptID, projID); err != nil {
+			return
+		}
 	}
 	gpuIDs, nodeID, err := s.place(ctx, orgID, gpuType, count)
 	if err != nil {

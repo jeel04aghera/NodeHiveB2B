@@ -38,8 +38,14 @@ func (s *Service) scopeSpendINR(ctx context.Context, orgID uuid.UUID, scopeType 
 			`SELECT sum(amount) FROM cost_records WHERE org_id=$1 AND project_id=$2 AND period_start >= $3`,
 			orgID, scopeID, first).Scan(&usd)
 	case "department":
+		// cost_records has no workload_id — reach the workload through usage_records.
+		// (The old direct join referenced a nonexistent column, so department spend
+		// silently read 0 and department budgets/alerts never fired.)
 		_ = s.db.QueryRow(ctx,
-			`SELECT sum(c.amount) FROM cost_records c JOIN workloads w ON w.id=c.workload_id
+			`SELECT sum(c.amount)
+			   FROM cost_records c
+			   JOIN usage_records u ON u.id = c.usage_record_id
+			   JOIN workloads w ON w.id = u.workload_id
 			  WHERE c.org_id=$1 AND w.department_id=$2 AND c.period_start >= $3`,
 			orgID, scopeID, first).Scan(&usd)
 	default: // organization

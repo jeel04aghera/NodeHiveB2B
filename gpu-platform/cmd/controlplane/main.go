@@ -75,9 +75,10 @@ func main() {
 
 	identitySvc := identity.NewService(pool, cfg.Auth.JWTSecret, cfg.Auth.SessionTTL,
 		identity.WithAccessTTL(cfg.Auth.AccessTokenTTL),
-		identity.WithRefreshTTL(cfg.Auth.RefreshTokenTTL))
+		identity.WithRefreshTTL(cfg.Auth.RefreshTokenTTL),
+		identity.WithWelcomeCredit(cfg.Billing.WelcomeCredit))
 	inventorySvc := inventory.NewService(pool)
-	billingSvc := billing.NewService(pool)
+	billingSvc := billing.NewService(pool, billing.WithEnforcement(cfg.Billing.Enforce))
 	workloadsSvc := workloads.NewService(pool, agentDispatch, billingSvc)
 	telemetrySvc := telemetry.NewService(pool)
 	auditSvc := audit.NewService(pool)
@@ -112,6 +113,7 @@ func main() {
 	go runOfflineSweep(ctx, inventorySvc, workloadsSvc, log)
 	go runIdleSweep(ctx, policySvc, workloadsSvc, log)
 	go runAlertEval(ctx, opsSvc, log)
+	go runMeterSweep(ctx, billingSvc, log)
 
 	// ── gRPC agent gateway ────────────────────────────────────────────────────
 	grpcCreds, err := grpcServerCreds(cfg)
@@ -149,6 +151,7 @@ func main() {
 			httpapi.WithSecureCookies(!cfg.IsDev()),
 			httpapi.WithRefreshCookieTTL(cfg.Auth.RefreshTokenTTL),
 			httpapi.WithEmailSender(email.NewSender(cfg.Email.ResendAPIKey, cfg.Email.FromEmail, log)),
+			httpapi.WithSelfTopup(cfg.Billing.AllowSelfTopup),
 		),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -200,6 +203,28 @@ func runOfflineSweep(ctx context.Context, inv inventory.Service, wls workloads.S
 				log.Warn("stuck workload sweep failed", "err", err)
 			} else if n > 0 {
 				log.Info("reclaimed stuck workloads", "count", n)
+			}
+		}
+	}
+}
+
+// runMeterSweep periodically bills running workloads (usage/cost records + ledger
+// debit per unmetered slice) and settles terminal workloads whose stop-time
+// settlement was lost. 60s cadence; the per-workload minimum slice lives in billing,
+// so frequent ticks are cheap no-ops. This is what makes billing restart-safe: all
+// metering state is the metered_until watermark in the database.
+func runMeterSweep(ctx context.Context, b billing.Service, log *slog.Logger) {
+	t := time.NewTicker(60 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if n, err := b.MeterRunning(ctx); err != nil {
+				log.Warn("metering sweep error", "err", err, "metered", n)
+			} else if n > 0 {
+				log.Info("metered workloads", "count", n)
 			}
 		}
 	}

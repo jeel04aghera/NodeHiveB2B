@@ -150,7 +150,7 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessage, a
 			go s.handleMetricsBatch(stream.Context(), ai, p.Metrics)
 
 		case *agentv1.AgentMessage_WorkloadStatus:
-			go s.handleWorkloadStatus(stream.Context(), p.WorkloadStatus)
+			go s.handleWorkloadStatus(stream.Context(), ai, p.WorkloadStatus)
 
 		case *agentv1.AgentMessage_CommandResult:
 			s.log.Debug("command result", "node_id", ai.NodeID,
@@ -241,7 +241,11 @@ func (s *Server) resolveGPUIDs(ctx context.Context, nodeID uuid.UUID) map[string
 	return m
 }
 
-func (s *Server) handleWorkloadStatus(ctx context.Context, ws *workloadv1.WorkloadStatus) {
+// handleWorkloadStatus applies an agent's status report. The workload reference is
+// attacker-controlled input (any enrolled agent can claim any UUID), so every write
+// below is scoped to ai.NodeID inside the workloads service — a report for a workload
+// not assigned to this node is dropped and logged (C1: cross-tenant write prevention).
+func (s *Server) handleWorkloadStatus(ctx context.Context, ai authInfo, ws *workloadv1.WorkloadStatus) {
 	if ws == nil {
 		return
 	}
@@ -252,17 +256,17 @@ func (s *Server) handleWorkloadStatus(ctx context.Context, ws *workloadv1.Worklo
 	// Granular deployment stage report (F1/F2) — recorded as a lifecycle event,
 	// not a status transition.
 	if msg := ws.GetMessage(); strings.HasPrefix(msg, "STAGE:") {
-		if err := s.workloadsSvc.RecordStageEvent(ctx, id, strings.TrimPrefix(msg, "STAGE:")); err != nil {
-			s.log.Warn("record stage event failed", "workload_id", id, "err", err)
+		if err := s.workloadsSvc.RecordStageEvent(ctx, ai.NodeID, id, strings.TrimPrefix(msg, "STAGE:")); err != nil {
+			s.log.Warn("record stage event rejected", "workload_id", id, "node_id", ai.NodeID, "err", err)
 		}
 		return
 	}
 	state := protoToWorkloadState(ws.GetState())
 	// message field carries optional JSON {"logs":"..."} from the agent
 	logs := extractLogs(ws.GetMessage())
-	if err := s.workloadsSvc.UpdateStatus(ctx, id, state,
+	if err := s.workloadsSvc.UpdateStatus(ctx, ai.NodeID, id, state,
 		ws.GetSshEndpoint(), ws.GetJupyterEndpoint(), ws.GetMessage(), logs); err != nil {
-		s.log.Warn("update workload status failed", "workload_id", id, "err", err)
+		s.log.Warn("update workload status rejected", "workload_id", id, "node_id", ai.NodeID, "err", err)
 	}
 }
 
@@ -309,6 +313,8 @@ func enrollError(err error) error {
 		return status.Error(codes.PermissionDenied, "enrollment token expired")
 	case errors.Is(err, nodes.ErrTokenExhausted):
 		return status.Error(codes.PermissionDenied, "enrollment token exhausted")
+	case errors.Is(err, nodes.ErrFingerprintConflict):
+		return status.Error(codes.PermissionDenied, "this machine is already enrolled by another organization")
 	default:
 		return status.Error(codes.Internal, "enrollment failed")
 	}

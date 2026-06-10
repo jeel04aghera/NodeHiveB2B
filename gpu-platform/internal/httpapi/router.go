@@ -49,6 +49,11 @@ type API struct {
 
 	// Email (Phase 3.5) — invitation delivery. nil => console fallback (dev).
 	email email.Sender
+
+	// allowSelfTopup permits org admins to credit their own balance via the API.
+	// Default FALSE: until a payment provider is integrated, self-topup is free money —
+	// production grants go through the operator. Dev/self-host enable it via config.
+	allowSelfTopup bool
 }
 
 // Option configures optional API features without breaking existing NewRouter callers.
@@ -72,6 +77,9 @@ func WithRefreshCookieTTL(d time.Duration) Option { return func(a *API) { a.refr
 
 // WithEmailSender wires the invitation email sender (console fallback used if unset).
 func WithEmailSender(s email.Sender) Option { return func(a *API) { a.email = s } }
+
+// WithSelfTopup enables the self-serve credit top-up endpoint (dev/self-host only).
+func WithSelfTopup(b bool) Option { return func(a *API) { a.allowSelfTopup = b } }
 
 func NewRouter(
 	nodesSvc *nodes.Service,
@@ -110,24 +118,33 @@ func NewRouter(
 	r.Get("/install.sh", a.installScript)
 	r.Handle("/dist/*", http.StripPrefix("/dist/", http.FileServer(http.Dir(agentDistDir()))))
 
+	// Per-IP limiters for credential-sensitive endpoints (H3). Sized to never bother a
+	// human (or the SPA's single-flight refresh) while killing brute force: bcrypt at
+	// 20 attempts/min/IP makes online password guessing useless, and 30/min on the
+	// token-probe endpoints makes invite/join-code guessing (2^48+ space) intractable.
+	loginLimiter := newRateLimiter(20, time.Minute)
+	registerLimiter := newRateLimiter(10, time.Minute)
+	refreshLimiter := newRateLimiter(60, time.Minute)
+	tokenProbeLimiter := newRateLimiter(30, time.Minute)
+
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/healthz", a.health)
 
 		// Auth (public)
-		r.Post("/auth/login", a.login)
-		r.Post("/auth/register", a.register)
+		r.With(loginLimiter.middleware).Post("/auth/login", a.login)
+		r.With(registerLimiter.middleware).Post("/auth/register", a.register)
 		// Refresh + logout are public: gated by the HttpOnly refresh cookie, not a Bearer
 		// token (the access token may already be expired when these are called).
-		r.Post("/auth/refresh", a.refresh)
+		r.With(refreshLimiter.middleware).Post("/auth/refresh", a.refresh)
 		r.Post("/auth/logout", a.logout)
 
 		// Invite signup (no org) + public invitation preview (token-gated).
-		r.Post("/auth/register-pending", a.registerPending)
-		r.Get("/auth/invitations/{token}", a.previewInvitation)
+		r.With(registerLimiter.middleware).Post("/auth/register-pending", a.registerPending)
+		r.With(tokenProbeLimiter.middleware).Get("/auth/invitations/{token}", a.previewInvitation)
 
 		// Google OAuth (public). Handlers no-op with 404 when OAuth isn't configured.
 		r.Get("/auth/google/start", a.googleStart)
-		r.Get("/auth/google/callback", a.googleCallback)
+		r.With(loginLimiter.middleware).Get("/auth/google/callback", a.googleCallback)
 
 		// Authenticated routes
 		r.Group(func(r chi.Router) {
@@ -137,8 +154,9 @@ func NewRouter(
 			r.Get("/me", a.me)
 			r.Post("/onboarding/organization", a.onboardingCreateOrg)
 			// Join an existing org instead of creating one (invite token / join code).
-			r.Post("/onboarding/accept-invitation", a.acceptInvitation)
-			r.Post("/onboarding/join-code", a.joinViaCode)
+			// Token/code redemption is rate-limited: these accept guessable secrets.
+			r.With(tokenProbeLimiter.middleware).Post("/onboarding/accept-invitation", a.acceptInvitation)
+			r.With(tokenProbeLimiter.middleware).Post("/onboarding/join-code", a.joinViaCode)
 
 			// Active session management (available to every authenticated user, incl.
 			// pre-onboarding — they still have devices/sessions to manage).
@@ -443,7 +461,7 @@ func (a *API) listWorkloads(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]any, 0, len(list))
 	for _, wl := range list {
-		out = append(out, workloadResponse(wl))
+		out = append(out, workloadResponse(wl, canViewWorkloadSecrets(u, wl)))
 	}
 	writeJSON(w, 200, out)
 }
@@ -534,8 +552,21 @@ func (a *API) launchWorkload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "no_capacity", "no GPUs available matching request")
 		return
 	}
+	if errors.Is(err, workloads.ErrInvalidRequest) {
+		writeErr(w, 400, "validation", err.Error())
+		return
+	}
+	// Billing admission refusals (402): the request was valid but the org can't pay.
+	if errors.Is(err, billing.ErrInsufficientCredit) {
+		writeErr(w, 402, "insufficient_credit", "your organization has no remaining credit; add credits to launch workloads")
+		return
+	}
+	if errors.Is(err, billing.ErrBudgetExceeded) {
+		writeErr(w, 402, "budget_exceeded", err.Error())
+		return
+	}
 	if err != nil {
-		writeErr(w, 500, "internal", err.Error())
+		writeErr(w, 500, "internal", "could not launch workload")
 		return
 	}
 
@@ -545,7 +576,8 @@ func (a *API) launchWorkload(w http.ResponseWriter, r *http.Request) {
 			Action: "workload.launch", TargetType: "workload", TargetID: wl.ID.String(),
 		})
 	}()
-	writeJSON(w, 201, workloadResponse(wl))
+	// The launcher is the owner — they always see their own SSH credential.
+	writeJSON(w, 201, workloadResponse(wl, true))
 }
 
 func (a *API) getWorkload(w http.ResponseWriter, r *http.Request) {
@@ -563,7 +595,7 @@ func (a *API) getWorkload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not get workload")
 		return
 	}
-	resp := workloadResponse(d.Workload)
+	resp := workloadResponse(d.Workload, canViewWorkloadSecrets(u, d.Workload))
 	resp["gpus"] = d.GPUs
 	resp["runtime_seconds"] = d.RuntimeSeconds
 	resp["runtime_cost"] = d.RuntimeCost
@@ -668,6 +700,10 @@ func (a *API) workloadLogs(w http.ResponseWriter, r *http.Request) {
 	wl, err := a.workloads.Get(r.Context(), u.OrgID, id)
 	if err != nil {
 		writeErr(w, 404, "not_found", "workload not found")
+		return
+	}
+	if !canViewWorkloadSecrets(u, wl) {
+		writeErr(w, 403, "forbidden", "only the workload owner or an admin can view logs")
 		return
 	}
 	writeJSON(w, 200, map[string]string{"logs": wl.Logs})
@@ -842,6 +878,11 @@ func (a *API) creditLedger(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) topupCredits(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
+	if !a.allowSelfTopup {
+		writeErr(w, 403, "topup_disabled",
+			"self-serve top-ups are disabled on this deployment; contact your provider to add credits")
+		return
+	}
 	if !u.Role.AtLeast(domain.RoleAdmin) {
 		writeErr(w, 403, "forbidden", "admin only")
 		return
@@ -1169,7 +1210,14 @@ func gpuResponse(g domain.GPU) map[string]any {
 	}
 }
 
-func workloadResponse(w domain.Workload) map[string]any {
+// canViewWorkloadSecrets gates per-workload sensitive material (SSH password, container
+// logs): only the workload's owner and org admins/owners may see them. Other members
+// still see the workload itself (name/status/endpoints) — just not the credentials (H1).
+func canViewWorkloadSecrets(u domain.User, w domain.Workload) bool {
+	return w.UserID == u.ID || u.Role.AtLeast(domain.RoleAdmin)
+}
+
+func workloadResponse(w domain.Workload, includeSecrets bool) map[string]any {
 	r := map[string]any{
 		"id":                  w.ID.String(),
 		"name":                w.Name,
@@ -1180,11 +1228,13 @@ func workloadResponse(w domain.Workload) map[string]any {
 		"expose_ssh":          w.ExposeSSH,
 		"expose_jupyter":      w.ExposeJupyter,
 		"ssh_endpoint":        w.SSHEndpoint,
-		"ssh_password":        w.SSHPassword,
 		"jupyter_endpoint":    w.JupyterEndpoint,
 		"container_id":        w.ContainerID,
-		"logs":                w.Logs,
 		"created_at":          w.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if includeSecrets {
+		r["ssh_password"] = w.SSHPassword
+		r["logs"] = w.Logs
 	}
 	if w.NodeID != nil {
 		r["node_id"] = w.NodeID.String()

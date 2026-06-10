@@ -30,8 +30,16 @@ import (
 	agentv1 "github.com/nodehive/gpu-platform/gen/go/agent/v1"
 	nodev1 "github.com/nodehive/gpu-platform/gen/go/node/v1"
 	"github.com/nodehive/gpu-platform/internal/agentgw"
+	"github.com/nodehive/gpu-platform/internal/audit"
+	"github.com/nodehive/gpu-platform/internal/billing"
 	"github.com/nodehive/gpu-platform/internal/httpapi"
+	"github.com/nodehive/gpu-platform/internal/identity"
+	"github.com/nodehive/gpu-platform/internal/inventory"
 	"github.com/nodehive/gpu-platform/internal/nodes"
+	"github.com/nodehive/gpu-platform/internal/ops"
+	"github.com/nodehive/gpu-platform/internal/policy"
+	"github.com/nodehive/gpu-platform/internal/telemetry"
+	"github.com/nodehive/gpu-platform/internal/workloads"
 )
 
 func TestEnrollHeartbeatAndList(t *testing.T) {
@@ -81,19 +89,25 @@ func TestEnrollHeartbeatAndList(t *testing.T) {
 	if err := svc.EnsureDevToken(ctx, "dev", "test-token"); err != nil {
 		t.Fatalf("seed token: %v", err)
 	}
-	orgID, err := repo.OrgIDBySlug(ctx, "dev")
-	if err != nil {
+	if _, err := repo.OrgIDBySlug(ctx, "dev"); err != nil {
 		t.Fatalf("org id: %v", err)
 	}
 
-	// 2. Start the gRPC server on a random port.
+	// 2. Start the gRPC server on a random port (full service wiring, as main.go).
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	dispatcher := agentgw.GlobalDispatcher
+	billingSvc := billing.NewService(pool)
+	wlSvc := workloads.NewService(pool, agentgw.NewAgentDispatcher(dispatcher), billingSvc)
+	inventorySvc := inventory.NewService(pool)
+	telemetrySvc := telemetry.NewService(pool)
+	auditSvc := audit.NewService(pool)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	grpcSrv := grpc.NewServer(grpc.ChainStreamInterceptor(agentgw.StreamAuthInterceptor(svc)))
-	agentv1.RegisterAgentServiceServer(grpcSrv, agentgw.NewServer(svc, log))
+	agentv1.RegisterAgentServiceServer(grpcSrv,
+		agentgw.NewServer(svc, inventorySvc, telemetrySvc, wlSvc, auditSvc, dispatcher, log))
 	go func() { _ = grpcSrv.Serve(lis) }()
 	t.Cleanup(grpcSrv.Stop)
 
@@ -156,10 +170,23 @@ func TestEnrollHeartbeatAndList(t *testing.T) {
 		t.Fatal("no heartbeat persisted")
 	}
 
-	// 7. Call the HTTP endpoint.
-	httpSrv := httptest.NewServer(httpapi.NewRouter(svc, orgID))
+	// 7. Call the HTTP endpoint as an authenticated org user. BootstrapAdmin attaches
+	// an owner to the (only) dev org; login yields the Bearer token.
+	idSvc := identity.NewService(pool, "test-secret-thirtytwo-chars-long!!", time.Hour)
+	if err := idSvc.BootstrapAdmin(ctx, "admin@test.local:password123"); err != nil {
+		t.Fatalf("bootstrap admin: %v", err)
+	}
+	userTok, _, err := idSvc.Login(ctx, "admin@test.local", "password123")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	httpSrv := httptest.NewServer(httpapi.NewRouter(
+		svc, idSvc, inventorySvc, wlSvc, telemetrySvc, billingSvc, auditSvc,
+		policy.NewService(pool), ops.New(pool)))
 	t.Cleanup(httpSrv.Close)
-	resp, err := http.Get(httpSrv.URL + "/api/v1/nodes")
+	req, _ := http.NewRequest(http.MethodGet, httpSrv.URL+"/api/v1/nodes", nil)
+	req.Header.Set("Authorization", "Bearer "+userTok)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET /nodes: %v", err)
 	}

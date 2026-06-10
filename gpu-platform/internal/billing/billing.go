@@ -54,8 +54,19 @@ type CreditSummary struct {
 type Service interface {
 	// RecordUsage appends an immutable usage record (insert-only).
 	RecordUsage(ctx context.Context, rec domain.UsageRecord) error
-	// RecordWorkloadUsage computes GPU-hours from start→end and writes usage+cost records.
-	RecordWorkloadUsage(ctx context.Context, workloadID, orgID uuid.UUID, start, end time.Time) error
+
+	// AuthorizeLaunch is the admission gate: positive credit balance and no exhausted
+	// budget in the workload's scopes. Returns ErrInsufficientCredit/ErrBudgetExceeded.
+	// A no-op when enforcement is disabled (advisory deployments).
+	AuthorizeLaunch(ctx context.Context, orgID uuid.UUID, departmentID, projectID *uuid.UUID) error
+	// MeterWorkload bills a workload's unmetered slice (watermark → now/stopped_at)
+	// atomically: usage records, cost records, ledger debit, watermark advance.
+	// Idempotent — safe to call from both stop-time settlement and the sweep.
+	MeterWorkload(ctx context.Context, workloadID uuid.UUID) error
+	// MeterRunning meters every workload owing a billable slice, including terminal
+	// workloads whose final settlement was lost to a crash. Run on a ticker.
+	MeterRunning(ctx context.Context) (int, error)
+
 	Chargeback(ctx context.Context, orgID uuid.UUID, from, to time.Time, groupBy string) (ChargebackReport, error)
 	SetRate(ctx context.Context, orgID uuid.UUID, gpuModel string, ratePerHour float64, currency string) (domain.RateCard, error)
 	ListRates(ctx context.Context, orgID uuid.UUID) ([]domain.RateCard, error)

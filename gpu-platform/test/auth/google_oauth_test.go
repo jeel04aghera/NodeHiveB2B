@@ -120,19 +120,25 @@ func TestOnboardingAttachesOrg(t *testing.T) {
 		t.Fatal("precondition: user should start pre-onboarding")
 	}
 
-	_, onb, err := svc.CreateOrgForUser(ctx, u.ID, "Startup Inc")
+	// Onboard through a welcome-credit-configured service (same pool) so the test
+	// covers the full provisioning path. The default service grants NO credit
+	// (Billing P0: free credits are an explicit operator decision).
+	welcomeSvc := identity.NewService(pool, "test-secret-thirtytwo-chars-long!!", time.Hour,
+		identity.WithWelcomeCredit(500))
+	_, onb, err := welcomeSvc.CreateOrgForUser(ctx, u.ID, "Startup Inc")
 	if err != nil {
 		t.Fatalf("create org: %v", err)
 	}
 	if !onb.Onboarded() || onb.Role != "owner" {
 		t.Errorf("after onboarding expected owner with org, got role=%q org=%v", onb.Role, onb.OrgID)
 	}
-	// Org was fully provisioned (rate cards + welcome credit), like Register.
-	var rateCards, credits int
+	// Org was fully provisioned (rate cards + the configured welcome credit).
+	var rateCards int
+	var granted float64
 	_ = pool.QueryRow(ctx, `SELECT count(*) FROM rate_cards WHERE org_id=$1`, onb.OrgID).Scan(&rateCards)
-	_ = pool.QueryRow(ctx, `SELECT count(*) FROM credit_ledger WHERE org_id=$1`, onb.OrgID).Scan(&credits)
-	if rateCards == 0 || credits == 0 {
-		t.Errorf("org not fully provisioned: rate_cards=%d credits=%d", rateCards, credits)
+	_ = pool.QueryRow(ctx, `SELECT coalesce(sum(delta),0) FROM credit_ledger WHERE org_id=$1`, onb.OrgID).Scan(&granted)
+	if rateCards == 0 || granted != 500 {
+		t.Errorf("org not fully provisioned: rate_cards=%d granted=%v (want >0 rate cards, 500 credit)", rateCards, granted)
 	}
 
 	// Second onboarding attempt is rejected (single-org-per-user).

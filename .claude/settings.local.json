@@ -194,7 +194,17 @@
       "Bash(cat /Users/jeelaghera/.claude/projects/-Users-jeelaghera-Downloads-Koala/memory/project_nodehive.md)",
       "Read(//Applications/Docker.app/**)",
       "Bash(colima status *)",
-      "Bash(perl -0pi -e 's/u\\\\.Role != domain\\\\.RoleAdmin/!u.Role.AtLeast\\(domain.RoleAdmin\\)/g' internal/httpapi/ops.go internal/httpapi/phase1.go internal/httpapi/router.go)"
+      "Bash(perl -0pi -e 's/u\\\\.Role != domain\\\\.RoleAdmin/!u.Role.AtLeast\\(domain.RoleAdmin\\)/g' internal/httpapi/ops.go internal/httpapi/phase1.go internal/httpapi/router.go)",
+      "Bash(claude update *)",
+      "Bash(git -C . log --oneline -5 -- .github)",
+      "Bash(go vet *)",
+      "Bash(git -C /Users/jeelaghera/Downloads/Koala status --short)",
+      "Bash(git -C /Users/jeelaghera/Downloads/Koala diff --stat)",
+      "Bash(sed -n '1,60p' migrations/0006_enterprise.sql)",
+      "Bash(sed -n '150,200p' migrations/0001_init.sql)",
+      "Bash(docker rm *)",
+      "Bash(git -C /Users/jeelaghera/Downloads/Koala diff --stat -- gpu-platform)",
+      "Bash(git -C /Users/jeelaghera/Downloads/Koala status --short -- gpu-platform)"
     ]
   }
 }

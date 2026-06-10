@@ -2,18 +2,48 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/nodehive/gpu-platform/internal/domain"
 )
 
-type ServiceImpl struct{ db *pgxpool.Pool }
+// Admission errors. The API maps these to 402 so the frontend can tell the user
+// exactly why the launch was refused.
+var (
+	ErrInsufficientCredit = errors.New("insufficient credit balance")
+	ErrBudgetExceeded     = errors.New("budget exceeded")
+)
 
-func NewService(db *pgxpool.Pool) Service { return &ServiceImpl{db: db} }
+// meterMinSlice is the smallest time slice the periodic sweep bills for a RUNNING
+// workload (terminal settlement always bills the remainder, however small). It bounds
+// usage/cost row volume to ~288 rows/day per GPU while keeping the balance fresh
+// enough for admission checks.
+const meterMinSlice = 5 * time.Minute
+
+type ServiceImpl struct {
+	db      *pgxpool.Pool
+	enforce bool // credit/budget admission enforcement (BILLING_ENFORCE)
+}
+
+type Option func(*ServiceImpl)
+
+// WithEnforcement toggles credit-balance and budget admission checks at workload
+// launch. Disabled = advisory mode (internal chargeback deployments).
+func WithEnforcement(b bool) Option { return func(s *ServiceImpl) { s.enforce = b } }
+
+func NewService(db *pgxpool.Pool, opts ...Option) Service {
+	s := &ServiceImpl{db: db, enforce: true}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
 
 func (s *ServiceImpl) RecordUsage(ctx context.Context, rec domain.UsageRecord) error {
 	_, err := s.db.Exec(ctx,
@@ -137,16 +167,158 @@ func (s *ServiceImpl) ListRates(ctx context.Context, orgID uuid.UUID) ([]domain.
 	return out, rows.Err()
 }
 
-// RecordWorkloadUsage is called when a workload stops — computes GPU-hours and inserts records.
-func (s *ServiceImpl) RecordWorkloadUsage(ctx context.Context, workloadID, orgID uuid.UUID, start, end time.Time) error {
+// ── Admission (launch-time enforcement) ────────────────────────────────────────
+
+// AuthorizeLaunch decides whether an org may start a new workload: the credit
+// balance must be positive and no applicable budget (organization scope, plus the
+// workload's department/project scopes) may already be exhausted month-to-date.
+// Enforcement is configuration-gated; advisory deployments always pass.
+func (s *ServiceImpl) AuthorizeLaunch(ctx context.Context, orgID uuid.UUID, departmentID, projectID *uuid.UUID) error {
+	if !s.enforce {
+		return nil
+	}
+	var balance float64
+	err := s.db.QueryRow(ctx,
+		`SELECT balance FROM credit_ledger WHERE org_id=$1 ORDER BY seq DESC LIMIT 1`,
+		orgID).Scan(&balance)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("read balance: %w", err) // fail closed on DB errors
+	}
+	if balance <= 0 {
+		return ErrInsufficientCredit
+	}
+
 	rows, err := s.db.Query(ctx,
+		`SELECT scope_type, scope_id, amount FROM budgets
+		  WHERE org_id=$1
+		    AND (scope_type='organization'
+		         OR (scope_type='department' AND scope_id=$2)
+		         OR (scope_type='project'    AND scope_id=$3))`,
+		orgID, departmentID, projectID)
+	if err != nil {
+		return fmt.Errorf("read budgets: %w", err)
+	}
+	defer rows.Close()
+	type budget struct {
+		scopeType string
+		scopeID   *uuid.UUID
+		amount    float64
+	}
+	var budgets []budget
+	for rows.Next() {
+		var b budget
+		if err := rows.Scan(&b.scopeType, &b.scopeID, &b.amount); err != nil {
+			return err
+		}
+		budgets = append(budgets, b)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, b := range budgets {
+		if b.amount <= 0 {
+			continue
+		}
+		if s.scopeSpendINR(ctx, orgID, b.scopeType, b.scopeID) >= b.amount {
+			return fmt.Errorf("%w: %s budget is exhausted for this month", ErrBudgetExceeded, b.scopeType)
+		}
+	}
+	return nil
+}
+
+// scopeSpendINR is month-to-date spend for a budget scope, in the ledger currency.
+// Department spend goes through usage_records to reach the workload (cost_records
+// has no workload_id column).
+func (s *ServiceImpl) scopeSpendINR(ctx context.Context, orgID uuid.UUID, scopeType string, scopeID *uuid.UUID) float64 {
+	now := time.Now()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	var usd *float64
+	switch scopeType {
+	case "project":
+		_ = s.db.QueryRow(ctx,
+			`SELECT sum(amount) FROM cost_records
+			  WHERE org_id=$1 AND project_id=$2 AND period_start >= $3`,
+			orgID, scopeID, monthStart).Scan(&usd)
+	case "department":
+		_ = s.db.QueryRow(ctx,
+			`SELECT sum(c.amount)
+			   FROM cost_records c
+			   JOIN usage_records u ON u.id = c.usage_record_id
+			   JOIN workloads w ON w.id = u.workload_id
+			  WHERE c.org_id=$1 AND w.department_id=$2 AND c.period_start >= $3`,
+			orgID, scopeID, monthStart).Scan(&usd)
+	default: // organization
+		_ = s.db.QueryRow(ctx,
+			`SELECT sum(amount) FROM cost_records WHERE org_id=$1 AND period_start >= $2`,
+			orgID, monthStart).Scan(&usd)
+	}
+	if usd == nil {
+		return 0
+	}
+	return *usd * usdToINR
+}
+
+// ── Metering (periodic accrual + terminal settlement) ──────────────────────────
+
+// MeterWorkload bills the unmetered time slice of one workload: from the watermark
+// (metered_until, or started_at for the first slice) to now for active workloads, or
+// to stopped_at for terminal ones. Usage records, cost records, the ledger debit and
+// the watermark advance commit in ONE transaction under a row lock, so the sweep and
+// stop-time settlement can race freely without double-billing, and a crash anywhere
+// re-bills nothing and loses nothing (the next sweep resumes from the watermark).
+func (s *ServiceImpl) MeterWorkload(ctx context.Context, workloadID uuid.UUID) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var orgID, userID uuid.UUID
+	var projectID *uuid.UUID
+	var status string
+	var startedAt, stoppedAt, meteredUntil *time.Time
+	err = tx.QueryRow(ctx,
+		`SELECT org_id, user_id, project_id, status, started_at, stopped_at, metered_until
+		   FROM workloads WHERE id=$1 FOR UPDATE`, workloadID).
+		Scan(&orgID, &userID, &projectID, &status, &startedAt, &stoppedAt, &meteredUntil)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // workload gone; nothing to bill
+	}
+	if err != nil {
+		return fmt.Errorf("load workload: %w", err)
+	}
+	if startedAt == nil {
+		return nil // never started; nothing billable
+	}
+
+	from := *startedAt
+	if meteredUntil != nil && meteredUntil.After(from) {
+		from = *meteredUntil
+	}
+	terminal := status == "stopped" || status == "failed"
+	to := time.Now()
+	if terminal {
+		if stoppedAt == nil {
+			return nil
+		}
+		to = *stoppedAt
+	}
+	if !to.After(from) {
+		return nil // fully settled
+	}
+	if !terminal && to.Sub(from) < meterMinSlice {
+		return nil // wait for a fuller slice
+	}
+
+	// GPUs attached to this workload (rows persist after detach, so terminal
+	// settlement still sees them).
+	rows, err := tx.Query(ctx,
 		`SELECT wg.gpu_id, g.model
 		   FROM workload_gpus wg JOIN gpus g ON g.id=wg.gpu_id
 		  WHERE wg.workload_id=$1`, workloadID)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	type gpuEntry struct {
 		id    uuid.UUID
 		model string
@@ -155,32 +327,35 @@ func (s *ServiceImpl) RecordWorkloadUsage(ctx context.Context, workloadID, orgID
 	for rows.Next() {
 		var e gpuEntry
 		if err := rows.Scan(&e.id, &e.model); err != nil {
+			rows.Close()
 			return err
 		}
 		gpus = append(gpus, e)
 	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
 
-	gpuSeconds := int64(end.Sub(start).Seconds())
+	gpuSeconds := int64(to.Sub(from).Seconds())
 	var total float64
 	for _, g := range gpus {
-		// Find applicable rate
 		var rate float64
 		var currency string
 		var rateCardID *uuid.UUID
 		var rcID uuid.UUID
-		err := s.db.QueryRow(ctx,
+		err := tx.QueryRow(ctx,
 			`SELECT id, rate_per_gpu_hour, currency FROM rate_cards
 			  WHERE org_id=$1 AND gpu_model=$2 AND effective_from <= $3
 			    AND (effective_to IS NULL OR effective_to > $3)
 			  ORDER BY effective_from DESC LIMIT 1`,
-			orgID, g.model, end).Scan(&rcID, &rate, &currency)
+			orgID, g.model, to).Scan(&rcID, &rate, &currency)
 		if err == nil {
 			rateCardID = &rcID
 		} else {
-			// Use org default rate
 			var dr float64
 			var cur string
-			_ = s.db.QueryRow(ctx,
+			_ = tx.QueryRow(ctx,
 				`SELECT (settings->>'default_rate')::float, coalesce(settings->>'currency','USD')
 				   FROM organizations WHERE id=$1`, orgID).Scan(&dr, &cur)
 			rate = dr
@@ -190,63 +365,110 @@ func (s *ServiceImpl) RecordWorkloadUsage(ctx context.Context, workloadID, orgID
 			}
 		}
 
-		// Get workload details for user/project FK
-		var userID uuid.UUID
-		var projectID *uuid.UUID
-		_ = s.db.QueryRow(ctx,
-			`SELECT user_id, project_id FROM workloads WHERE id=$1`, workloadID).
-			Scan(&userID, &projectID)
-
-		// Avg utilization for this GPU over the workload window (real telemetry).
+		// Avg utilization for this GPU over the slice (real telemetry).
 		var avgUtil *float64
-		_ = s.db.QueryRow(ctx,
+		_ = tx.QueryRow(ctx,
 			`SELECT avg(util_pct) FROM gpu_metrics
-			  WHERE gpu_id=$1 AND ts >= $2 AND ts <= $3`, g.id, start, end).Scan(&avgUtil)
+			  WHERE gpu_id=$1 AND ts >= $2 AND ts <= $3`, g.id, from, to).Scan(&avgUtil)
 
-		// Insert usage record
 		var usageID int64
-		err = s.db.QueryRow(ctx,
+		if err := tx.QueryRow(ctx,
 			`INSERT INTO usage_records
 			   (org_id, workload_id, gpu_id, project_id, user_id, period_start, period_end, gpu_seconds, avg_util_pct, source)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'workload')
 			 RETURNING id`,
-			orgID, workloadID, g.id, projectID, userID, start, end, gpuSeconds, avgUtil).Scan(&usageID)
-		if err != nil {
-			continue
+			orgID, workloadID, g.id, projectID, userID, from, to, gpuSeconds, avgUtil).Scan(&usageID); err != nil {
+			return fmt.Errorf("insert usage: %w", err)
 		}
 
 		amount := float64(gpuSeconds) / 3600 * rate
-		_, _ = s.db.Exec(ctx,
+		if _, err := tx.Exec(ctx,
 			`INSERT INTO cost_records
 			   (org_id, usage_record_id, rate_card_id, project_id, user_id,
 			    period_start, period_end, gpu_seconds, rate_per_gpu_hour, currency, amount)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-			orgID, usageID, rateCardID, projectID, userID, start, end, gpuSeconds, rate, currency, amount)
+			orgID, usageID, rateCardID, projectID, userID, from, to, gpuSeconds, rate, currency, amount); err != nil {
+			return fmt.Errorf("insert cost: %w", err)
+		}
 		total += amount
 	}
 
-	// Debit the org's credit balance for the finalized cost of this workload run.
-	// The ledger is denominated in the product's display currency (INR); rate cards
-	// and cost_records are in USD, so convert here.
+	// Ledger debit (display currency) + watermark advance, same transaction.
 	if total > 0 {
-		_ = s.postLedger(ctx, orgID, -total*usdToINR, "charge", "Workload usage", &workloadID)
+		if err := postLedgerTx(ctx, tx, orgID, -total*usdToINR, "charge", "Workload usage", &workloadID); err != nil {
+			return fmt.Errorf("ledger debit: %w", err)
+		}
 	}
-	return nil
+	if _, err := tx.Exec(ctx,
+		`UPDATE workloads SET metered_until=$2 WHERE id=$1`, workloadID, to); err != nil {
+		return fmt.Errorf("advance watermark: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// MeterRunning finds every workload owing a billable slice — active ones past the
+// minimum slice age, and terminal ones whose final slice was never settled (e.g. the
+// control plane died before stop-time settlement) — and meters each. Returns the
+// number of workloads billed.
+func (s *ServiceImpl) MeterRunning(ctx context.Context) (int, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id FROM workloads
+		 WHERE started_at IS NOT NULL
+		   AND (
+		     (status IN ('running','stopping')
+		        AND COALESCE(metered_until, started_at) < now() - interval '5 minutes')
+		     OR (status IN ('stopped','failed') AND stopped_at IS NOT NULL
+		        AND COALESCE(metered_until, started_at) < stopped_at)
+		   )`)
+	if err != nil {
+		return 0, err
+	}
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	metered := 0
+	var firstErr error
+	for _, id := range ids {
+		if err := s.MeterWorkload(ctx, id); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("meter %s: %w", id, err)
+			}
+			continue
+		}
+		metered++
+	}
+	return metered, firstErr
 }
 
 // usdToINR is the display-currency conversion used for the credit ledger. It mirrors
 // the frontend's USD_TO_INR so credit charges line up with displayed spend.
 const usdToINR = 83.0
 
-// postLedger appends a credit_ledger entry, computing the running balance from
-// the most recent entry for the org. Not safe under heavy concurrency, but the
-// metering path is serialized per workload-stop, which is sufficient here.
-func (s *ServiceImpl) postLedger(ctx context.Context, orgID uuid.UUID, delta float64, kind, desc string, workloadID *uuid.UUID) error {
-	_, err := s.db.Exec(ctx,
+// postLedgerTx appends a credit_ledger entry inside the caller's transaction. A
+// per-org advisory transaction lock serializes concurrent writers (top-up racing the
+// metering sweep), so the read-compute-write of the running balance is safe; seq
+// gives rows a stable total order for "latest balance" reads.
+func postLedgerTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, delta float64, kind, desc string, workloadID *uuid.UUID) error {
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 42))`, orgID.String()); err != nil {
+		return fmt.Errorf("ledger lock: %w", err)
+	}
+	_, err := tx.Exec(ctx,
 		`INSERT INTO credit_ledger (org_id, delta, balance, kind, description, workload_id)
 		 VALUES ($1, $2,
 		         coalesce((SELECT balance FROM credit_ledger WHERE org_id=$1
-		                    ORDER BY created_at DESC, id DESC LIMIT 1), 0) + $2,
+		                    ORDER BY seq DESC LIMIT 1), 0) + $2,
 		         $3, $4, $5)`,
 		orgID, delta, kind, desc, workloadID)
 	return err
@@ -259,7 +481,15 @@ func (s *ServiceImpl) AddCredit(ctx context.Context, orgID uuid.UUID, amount flo
 	if kind == "" {
 		kind = "topup"
 	}
-	if err := s.postLedger(ctx, orgID, amount, kind, description, nil); err != nil {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := postLedgerTx(ctx, tx, orgID, amount, kind, description, nil); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return 0, err
 	}
 	sum, err := s.CreditSummary(ctx, orgID)
@@ -270,7 +500,7 @@ func (s *ServiceImpl) CreditSummary(ctx context.Context, orgID uuid.UUID) (Credi
 	var out CreditSummary
 	_ = s.db.QueryRow(ctx,
 		`SELECT
-		   coalesce((SELECT balance FROM credit_ledger WHERE org_id=$1 ORDER BY created_at DESC, id DESC LIMIT 1), 0),
+		   coalesce((SELECT balance FROM credit_ledger WHERE org_id=$1 ORDER BY seq DESC LIMIT 1), 0),
 		   coalesce(sum(delta) FILTER (WHERE delta > 0), 0),
 		   coalesce(-sum(delta) FILTER (WHERE delta < 0), 0),
 		   coalesce(-sum(delta) FILTER (WHERE delta < 0 AND created_at >= date_trunc('month', now())), 0)
@@ -291,7 +521,7 @@ func (s *ServiceImpl) Ledger(ctx context.Context, orgID uuid.UUID, limit int) ([
 	rows, err := s.db.Query(ctx,
 		`SELECT id, delta, balance, kind, description, workload_id, created_at
 		   FROM credit_ledger WHERE org_id=$1
-		  ORDER BY created_at DESC, id DESC LIMIT $2`, orgID, limit)
+		  ORDER BY seq DESC LIMIT $2`, orgID, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -32,6 +32,12 @@ type ServiceImpl struct {
 	sessionTTL time.Duration // legacy/fallback access-token TTL
 	accessTTL  time.Duration // 0 => fall back to sessionTTL
 	refreshTTL time.Duration // 0 => default 30 days
+
+	// welcomeCredit is granted to each NEW organization at provisioning. Defaults to 0
+	// (fail closed): registration is unauthenticated and rate limits alone don't stop
+	// patient credit farming, so free credits in production are an explicit operator
+	// decision (WELCOME_CREDIT env), not a baked-in default.
+	welcomeCredit float64
 }
 
 func NewService(db *pgxpool.Pool, jwtSecret string, sessionTTL time.Duration, opts ...Option) Service {
@@ -130,7 +136,7 @@ func (s *ServiceImpl) Register(ctx context.Context, orgName, email, name, passwo
 	if name == "" {
 		name = "Admin"
 	}
-	orgID, err := provisionOrgTx(ctx, tx, orgName)
+	orgID, err := provisionOrgTx(ctx, tx, orgName, s.welcomeCredit)
 	if err != nil {
 		return "", domain.User{}, err
 	}
@@ -153,10 +159,12 @@ func (s *ServiceImpl) Register(ctx context.Context, orgName, email, name, passwo
 	return token, u, err
 }
 
-// provisionOrgTx creates an organization with default rate cards and a welcome credit
-// grant inside an existing transaction, returning the new org id. Shared by Register
-// (new account) and CreateOrgForUser (existing pre-onboarding user). createdBy may be nil.
-func provisionOrgTx(ctx context.Context, tx pgx.Tx, orgName string) (uuid.UUID, error) {
+// provisionOrgTx creates an organization with default rate cards and an optional
+// welcome credit grant inside an existing transaction, returning the new org id.
+// Shared by Register (new account) and CreateOrgForUser (existing pre-onboarding
+// user) — both org-creation paths grant the SAME configured amount, so neither can
+// be farmed harder than the other.
+func provisionOrgTx(ctx context.Context, tx pgx.Tx, orgName string, welcomeCredit float64) (uuid.UUID, error) {
 	slug := slugify(orgName) + "-" + randomToken()[:6]
 	var orgID uuid.UUID
 	if err := tx.QueryRow(ctx,
@@ -178,10 +186,12 @@ func provisionOrgTx(ctx context.Context, tx pgx.Tx, orgName string) (uuid.UUID, 
 			return uuid.Nil, fmt.Errorf("seed rate cards: %w", err)
 		}
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO credit_ledger (org_id, delta, balance, kind, description)
-		 VALUES ($1, 50000.0000, 50000.0000, 'grant', 'Welcome credit')`, orgID); err != nil {
-		return uuid.Nil, fmt.Errorf("seed credit: %w", err)
+	if welcomeCredit > 0 {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO credit_ledger (org_id, delta, balance, kind, description)
+			 VALUES ($1, $2, $2, 'grant', 'Welcome credit')`, orgID, welcomeCredit); err != nil {
+			return uuid.Nil, fmt.Errorf("seed credit: %w", err)
+		}
 	}
 	return orgID, nil
 }
@@ -273,7 +283,7 @@ func (s *ServiceImpl) CreateOrgForUser(ctx context.Context, userID uuid.UUID, or
 		return "", domain.User{}, errors.New("user already belongs to an organization")
 	}
 
-	orgID, err := provisionOrgTx(ctx, tx, orgName)
+	orgID, err := provisionOrgTx(ctx, tx, orgName, s.welcomeCredit)
 	if err != nil {
 		return "", domain.User{}, err
 	}

@@ -54,14 +54,19 @@ type Service interface {
 	Get(ctx context.Context, orgID, id uuid.UUID) (domain.Workload, error)
 	Detail(ctx context.Context, orgID, id uuid.UUID) (DetailView, error)
 	List(ctx context.Context, orgID uuid.UUID, f ListFilter) ([]domain.Workload, error)
-	UpdateStatus(ctx context.Context, id uuid.UUID, state domain.WorkloadState, ssh, jupyter, msg, logs string) error
+	// UpdateStatus applies an agent-reported state change. nodeID is the reporting
+	// agent's authenticated node identity: a workload not assigned to that node
+	// returns ErrNotFound, so one enrolled agent can never mutate another node's
+	// (or another org's) workloads.
+	UpdateStatus(ctx context.Context, nodeID, id uuid.UUID, state domain.WorkloadState, ssh, jupyter, msg, logs string) error
 	// SweepStuck reclaims GPUs from workloads whose node is offline (marks them failed)
 	// and frees any GPUs still attached to terminal workloads. Returns count reclaimed.
 	SweepStuck(ctx context.Context) (int, error)
 
 	// F1 — lifecycle events / timeline.
 	RecordEvent(ctx context.Context, workloadID, orgID uuid.UUID, stage, message string) error
-	RecordStageEvent(ctx context.Context, workloadID uuid.UUID, stage string) error
+	// RecordStageEvent is node-scoped like UpdateStatus (agent-originated input).
+	RecordStageEvent(ctx context.Context, nodeID, workloadID uuid.UUID, stage string) error
 	ListEvents(ctx context.Context, orgID, workloadID uuid.UUID) ([]WorkloadEvent, error)
 
 	// F3 — queue.

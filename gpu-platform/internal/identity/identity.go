@@ -127,6 +127,16 @@ func WithRefreshTTL(d time.Duration) Option {
 	}
 }
 
+// WithWelcomeCredit sets the credit granted to each newly provisioned organization.
+// Default 0 (no free credits) — see ServiceImpl.welcomeCredit for the rationale.
+func WithWelcomeCredit(amount float64) Option {
+	return func(s *ServiceImpl) {
+		if amount > 0 {
+			s.welcomeCredit = amount
+		}
+	}
+}
+
 type Store interface {
 	CreateUser(ctx context.Context, u domain.User) (domain.User, error)
 	UserByEmail(ctx context.Context, orgID uuid.UUID, email string) (domain.User, error)

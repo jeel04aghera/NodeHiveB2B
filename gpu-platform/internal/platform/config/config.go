@@ -53,6 +53,21 @@ type EmailConfig struct {
 
 func (e EmailConfig) Enabled() bool { return e.ResendAPIKey != "" && e.FromEmail != "" }
 
+// BillingConfig governs monetization enforcement (Billing P0). Production defaults
+// fail CLOSED: admission enforced, no welcome credits, no self-serve top-ups —
+// operators opt OUT for advisory/internal-chargeback deployments, never the reverse.
+type BillingConfig struct {
+	// Enforce gates workload launches on credit balance + budgets (BILLING_ENFORCE,
+	// default true).
+	Enforce bool
+	// WelcomeCredit is granted to each new organization (WELCOME_CREDIT, default 0
+	// in production / 50000 in dev so local onboarding still works out of the box).
+	WelcomeCredit float64
+	// AllowSelfTopup enables POST /billing/credits/topup (BILLING_ALLOW_SELF_TOPUP,
+	// default false in production / true in dev).
+	AllowSelfTopup bool
+}
+
 type Config struct {
 	Env                string // "development" or "production" (default). Gates dev bootstrap + secret checks.
 	DB                 DBConfig
@@ -61,6 +76,7 @@ type Config struct {
 	Auth               AuthConfig
 	Google             GoogleOAuthConfig
 	Email              EmailConfig
+	Billing            BillingConfig
 	AppBaseURL         string   // frontend origin the OAuth callback redirects back to
 	CORSAllowedOrigins []string // explicit allow-list; empty => permissive "*" (dev only, no credentials)
 	DevOrgSlug         string   // org that dev nodes enroll into (matches scripts/seed_dev.sql)
@@ -96,6 +112,17 @@ func Load() (Config, error) {
 		DevOrgSlug:         env("DEV_ORG_SLUG", "dev"),
 		DevEnrollmentToken: env("DEV_ENROLLMENT_TOKEN", "dev-enroll-token"),
 		DevBootstrapAdmin:  env("DEV_BOOTSTRAP_ADMIN", "admin@dev.local:admin123"),
+	}
+	// Billing defaults depend on the resolved mode (dev keeps the frictionless
+	// local experience; production fails closed).
+	devWelcome := 0.0
+	if c.IsDev() {
+		devWelcome = 50000
+	}
+	c.Billing = BillingConfig{
+		Enforce:        envBool("BILLING_ENFORCE", true),
+		WelcomeCredit:  envFloat("WELCOME_CREDIT", devWelcome),
+		AllowSelfTopup: envBool("BILLING_ALLOW_SELF_TOPUP", c.IsDev()),
 	}
 	return c, c.Validate()
 }
@@ -224,6 +251,15 @@ func envBool(k string, def bool) bool {
 	if v := os.Getenv(k); v != "" {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			return b
+		}
+	}
+	return def
+}
+
+func envFloat(k string, def float64) float64 {
+	if v := os.Getenv(k); v != "" {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && f >= 0 {
+			return f
 		}
 	}
 	return def

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -24,24 +25,90 @@ var _ = wrapperspb.String // suppress unused import if needed
 var ErrNotFound = errors.New("workload not found")
 var ErrNoGPUsAvailable = errors.New("no GPUs available matching request")
 var ErrNotQueued = errors.New("workload is not queued")
+var ErrInvalidRequest = errors.New("invalid launch request")
 
-// UsageRecorder is the billing seam — satisfied by billing.Service.
-type UsageRecorder interface {
-	RecordWorkloadUsage(ctx context.Context, workloadID, orgID uuid.UUID, start, end time.Time) error
+// Launch request bounds (M6). These are abuse limits, not capacity planning: gpu_count
+// is capped so a single request can't squat the queue, and the idle timeout is bounded
+// so a negative value can't wrap to a near-infinite uint32 on the wire and a huge value
+// can't opt a workload out of idle reclaim entirely.
+const (
+	maxGPUsPerWorkload = 16
+	maxNameLen         = 120
+	maxImageLen        = 256
+	minIdleTimeoutSec  = 60
+	maxIdleTimeoutSec  = 7 * 24 * 3600 // 7 days
+)
+
+// validateLaunch normalizes and bounds a launch request. Returns ErrInvalidRequest
+// (wrapped with the specific reason) so the API layer can map it to a 400.
+func validateLaunch(req *LaunchRequest) error {
+	req.Name = strings.TrimSpace(req.Name)
+	switch {
+	case req.Name == "":
+		return fmt.Errorf("%w: name is required", ErrInvalidRequest)
+	case len(req.Name) > maxNameLen:
+		return fmt.Errorf("%w: name must be at most %d characters", ErrInvalidRequest, maxNameLen)
+	case req.GPUCount > maxGPUsPerWorkload:
+		return fmt.Errorf("%w: gpu_count must be between 1 and %d", ErrInvalidRequest, maxGPUsPerWorkload)
+	case len(req.Image) > maxImageLen:
+		return fmt.Errorf("%w: image reference too long", ErrInvalidRequest)
+	case req.Image != "" && !imageRefPattern.MatchString(req.Image):
+		return fmt.Errorf("%w: image is not a valid container image reference", ErrInvalidRequest)
+	}
+	if req.GPUCount <= 0 {
+		req.GPUCount = 1
+	}
+	if req.IdleTimeoutSec != nil {
+		t := *req.IdleTimeoutSec
+		switch {
+		case t < 0:
+			return fmt.Errorf("%w: idle_timeout_sec cannot be negative", ErrInvalidRequest)
+		case t == 0:
+			req.IdleTimeoutSec = nil // 0 = use the default, never "no timeout"
+		case t < minIdleTimeoutSec:
+			return fmt.Errorf("%w: idle_timeout_sec must be at least %d", ErrInvalidRequest, minIdleTimeoutSec)
+		case t > maxIdleTimeoutSec:
+			return fmt.Errorf("%w: idle_timeout_sec must be at most %d (7 days)", ErrInvalidRequest, maxIdleTimeoutSec)
+		}
+	}
+	return nil
+}
+
+// imageRefPattern is a conservative container image reference check: registry/repo,
+// optional :tag or @sha256:digest. It rejects whitespace, shell metacharacters and
+// control bytes before the string travels to a docker invocation on the agent.
+var imageRefPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._\-]*(?::[0-9]+)?(?:/[a-zA-Z0-9._\-]+)*(?::[a-zA-Z0-9._\-]+)?(?:@sha256:[a-fA-F0-9]{64})?$`)
+
+// Biller is the billing seam — satisfied by billing.Service. AuthorizeLaunch gates
+// admission (credit balance + budgets); MeterWorkload settles a stopped workload's
+// final slice (the periodic sweep recovers it if this call is lost to a crash).
+type Biller interface {
+	AuthorizeLaunch(ctx context.Context, orgID uuid.UUID, departmentID, projectID *uuid.UUID) error
+	MeterWorkload(ctx context.Context, workloadID uuid.UUID) error
 }
 
 // ServiceImpl wires together placement, DB persistence, and command dispatch.
 type ServiceImpl struct {
 	db       *pgxpool.Pool
 	dispatch Dispatcher
-	billing  UsageRecorder
+	billing  Biller
 }
 
-func NewService(db *pgxpool.Pool, dispatch Dispatcher, billing UsageRecorder) Service {
+func NewService(db *pgxpool.Pool, dispatch Dispatcher, billing Biller) Service {
 	return &ServiceImpl{db: db, dispatch: dispatch, billing: billing}
 }
 
 func (s *ServiceImpl) Launch(ctx context.Context, orgID uuid.UUID, req LaunchRequest) (domain.Workload, error) {
+	if err := validateLaunch(&req); err != nil {
+		return domain.Workload{}, err
+	}
+	// Admission gate (Billing P0): no credit, or an exhausted budget in scope, refuses
+	// the launch BEFORE any GPU is reserved or queue slot taken.
+	if s.billing != nil {
+		if err := s.billing.AuthorizeLaunch(ctx, orgID, req.DepartmentID, req.ProjectID); err != nil {
+			return domain.Workload{}, err
+		}
+	}
 	image := req.Image
 	if image == "" {
 		image = "ubuntu:22.04"
@@ -351,7 +418,29 @@ func (s *ServiceImpl) List(ctx context.Context, orgID uuid.UUID, f ListFilter) (
 	return out, rows.Err()
 }
 
-func (s *ServiceImpl) UpdateStatus(ctx context.Context, id uuid.UUID, state domain.WorkloadState, ssh, jupyter, msg, logs string) error {
+// requireWorkloadOnNode verifies an agent-originated workload reference: the workload
+// must exist AND be assigned to the authenticated node. Both "no such workload" and
+// "assigned elsewhere" return ErrNotFound so a probing agent learns nothing (C1:
+// cross-tenant workload write prevention at the agent trust boundary).
+func (s *ServiceImpl) requireWorkloadOnNode(ctx context.Context, nodeID, id uuid.UUID) error {
+	var assigned *uuid.UUID
+	err := s.db.QueryRow(ctx, `SELECT node_id FROM workloads WHERE id=$1`, id).Scan(&assigned)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if assigned == nil || *assigned != nodeID {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *ServiceImpl) UpdateStatus(ctx context.Context, nodeID, id uuid.UUID, state domain.WorkloadState, ssh, jupyter, msg, logs string) error {
+	if err := s.requireWorkloadOnNode(ctx, nodeID, id); err != nil {
+		return err
+	}
 	now := time.Now()
 	switch state {
 	case domain.WorkloadRunning:
@@ -420,9 +509,12 @@ func (s *ServiceImpl) UpdateStatus(ctx context.Context, id uuid.UUID, state doma
 		}
 		_ = s.recordEvent(ctx, id, orgID, stageName, "")
 		go s.tryPromoteQueue(context.Background(), orgID)
-		if s.billing != nil && startedAt != nil {
+		// Final settlement: bill the remaining unmetered slice. Async but recoverable —
+		// the metering sweep settles terminal workloads whose watermark lags stopped_at,
+		// so a crash here loses nothing (Billing P0: survives control-plane restarts).
+		if s.billing != nil {
 			go func() {
-				_ = s.billing.RecordWorkloadUsage(context.Background(), id, orgID, *startedAt, now)
+				_ = s.billing.MeterWorkload(context.Background(), id)
 			}()
 		}
 		return nil

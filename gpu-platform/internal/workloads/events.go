@@ -49,11 +49,17 @@ func (s *ServiceImpl) RecordEvent(ctx context.Context, workloadID, orgID uuid.UU
 
 // RecordStageEvent is called from the agent gateway when an agent reports a
 // granular launch stage (image pull / build / container start). It resolves the
-// org from the workload so the gateway doesn't need to.
-func (s *ServiceImpl) RecordStageEvent(ctx context.Context, workloadID uuid.UUID, stage string) error {
+// org from the workload so the gateway doesn't need to. Node-scoped: a stage
+// report for a workload not assigned to the reporting node is rejected (C1).
+func (s *ServiceImpl) RecordStageEvent(ctx context.Context, nodeID, workloadID uuid.UUID, stage string) error {
 	var orgID uuid.UUID
-	if err := s.db.QueryRow(ctx, `SELECT org_id FROM workloads WHERE id=$1`, workloadID).Scan(&orgID); err != nil {
+	var assigned *uuid.UUID
+	if err := s.db.QueryRow(ctx,
+		`SELECT org_id, node_id FROM workloads WHERE id=$1`, workloadID).Scan(&orgID, &assigned); err != nil {
 		return err
+	}
+	if assigned == nil || *assigned != nodeID {
+		return ErrNotFound
 	}
 	return s.recordEvent(ctx, workloadID, orgID, stage, "")
 }

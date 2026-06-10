@@ -18,10 +18,11 @@ import (
 )
 
 var (
-	ErrNotFound       = errors.New("node not found")
-	ErrInvalidToken   = errors.New("invalid enrollment token")
-	ErrTokenExpired   = errors.New("enrollment token expired")
-	ErrTokenExhausted = errors.New("enrollment token exhausted")
+	ErrNotFound            = errors.New("node not found")
+	ErrInvalidToken        = errors.New("invalid enrollment token")
+	ErrTokenExpired        = errors.New("enrollment token expired")
+	ErrTokenExhausted      = errors.New("enrollment token exhausted")
+	ErrFingerprintConflict = errors.New("fingerprint already enrolled by another organization")
 )
 
 // NodeView is the read model returned to the API (includes derived gpu_count).
@@ -56,27 +57,15 @@ type Repo struct{ pool *pgxpool.Pool }
 
 func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
-const upsertNodeSQL = `
-INSERT INTO gpu_nodes
-  (org_id, fingerprint, hostname, status, os, kernel, cpu_model, cpu_cores, ram_mb, nvidia_driver, cuda_version, agent_version, last_seen_at)
-VALUES ($1,$2,$3,'online',$4,$5,$6,$7,$8,$9,$10,$11, now())
-ON CONFLICT (fingerprint) DO UPDATE SET
-  org_id        = EXCLUDED.org_id,
-  hostname      = EXCLUDED.hostname,
-  status        = 'online',
-  os            = EXCLUDED.os,
-  kernel        = EXCLUDED.kernel,
-  cpu_model     = EXCLUDED.cpu_model,
-  cpu_cores     = EXCLUDED.cpu_cores,
-  ram_mb        = EXCLUDED.ram_mb,
-  nvidia_driver = EXCLUDED.nvidia_driver,
-  cuda_version  = EXCLUDED.cuda_version,
-  agent_version = EXCLUDED.agent_version,
-  last_seen_at  = now()
-RETURNING id`
-
-// Enroll validates+consumes the token, upserts the node by fingerprint, and stores
-// the agent credential — all in a single transaction (the enrollment boundary).
+// Enroll validates+consumes the token, registers (or re-registers) the node by
+// fingerprint, and stores the agent credential — all in a single transaction.
+//
+// Fingerprints are CLIENT-SUPPLIED, so they are never trusted to move a node between
+// tenants: a fingerprint already enrolled by a different org is rejected with
+// ErrFingerprintConflict instead of silently re-homing the node (C2: node hijack).
+// A same-org re-enrollment is a credential rotation: every previous credential for
+// the node is revoked before the new one is stored, so a leaked old credential dies
+// the moment the box re-enrolls.
 func (r *Repo) Enroll(ctx context.Context, tokenHash, fingerprint string, info NodeInfo, credentialHash string) (nodeID, orgID uuid.UUID, err error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -106,12 +95,50 @@ func (r *Repo) Enroll(ctx context.Context, tokenHash, fingerprint string, info N
 		return uuid.Nil, uuid.Nil, fmt.Errorf("consume token: %w", err)
 	}
 
-	err = tx.QueryRow(ctx, upsertNodeSQL,
-		orgID, fingerprint, info.Hostname, info.OS, info.Kernel, info.CPUModel,
-		info.CPUCores, info.RAMMB, info.NvidiaDriver, info.CUDAVersion, info.AgentVersion,
-	).Scan(&nodeID)
-	if err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("upsert node: %w", err)
+	// Lock the fingerprint row (if any) so a concurrent enrollment of the same
+	// fingerprint serializes here instead of racing the insert below.
+	var existingID, existingOrg uuid.UUID
+	err = tx.QueryRow(ctx,
+		`SELECT id, org_id FROM gpu_nodes WHERE fingerprint=$1 FOR UPDATE`,
+		fingerprint).Scan(&existingID, &existingOrg)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// First enrollment of this fingerprint. The unique index on fingerprint
+		// backstops the (tiny) insert race left after the lock-by-select.
+		err = tx.QueryRow(ctx,
+			`INSERT INTO gpu_nodes
+			   (org_id, fingerprint, hostname, status, os, kernel, cpu_model, cpu_cores, ram_mb,
+			    nvidia_driver, cuda_version, agent_version, last_seen_at)
+			 VALUES ($1,$2,$3,'online',$4,$5,$6,$7,$8,$9,$10,$11, now())
+			 RETURNING id`,
+			orgID, fingerprint, info.Hostname, info.OS, info.Kernel, info.CPUModel,
+			info.CPUCores, info.RAMMB, info.NvidiaDriver, info.CUDAVersion, info.AgentVersion,
+		).Scan(&nodeID)
+		if err != nil {
+			return uuid.Nil, uuid.Nil, fmt.Errorf("insert node: %w", err)
+		}
+	case err != nil:
+		return uuid.Nil, uuid.Nil, fmt.Errorf("lookup node: %w", err)
+	case existingOrg != orgID:
+		// Fingerprint belongs to another tenant — refuse, never re-home.
+		return uuid.Nil, uuid.Nil, ErrFingerprintConflict
+	default:
+		// Same-org re-enrollment: refresh node facts, rotate credentials.
+		nodeID = existingID
+		if _, err = tx.Exec(ctx,
+			`UPDATE gpu_nodes SET
+			   hostname=$2, status='online', os=$3, kernel=$4, cpu_model=$5, cpu_cores=$6,
+			   ram_mb=$7, nvidia_driver=$8, cuda_version=$9, agent_version=$10, last_seen_at=now()
+			 WHERE id=$1`,
+			nodeID, info.Hostname, info.OS, info.Kernel, info.CPUModel,
+			info.CPUCores, info.RAMMB, info.NvidiaDriver, info.CUDAVersion, info.AgentVersion); err != nil {
+			return uuid.Nil, uuid.Nil, fmt.Errorf("update node: %w", err)
+		}
+		if _, err = tx.Exec(ctx,
+			`UPDATE agent_credentials SET revoked_at=now()
+			   WHERE node_id=$1 AND revoked_at IS NULL`, nodeID); err != nil {
+			return uuid.Nil, uuid.Nil, fmt.Errorf("revoke old credentials: %w", err)
+		}
 	}
 
 	if _, err = tx.Exec(ctx,
