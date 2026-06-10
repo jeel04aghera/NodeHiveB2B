@@ -39,6 +39,12 @@ func (s *Service) MarkOffline(ctx context.Context, nodeID uuid.UUID) error {
 	return s.repo.SetNodeStatus(ctx, nodeID, "offline")
 }
 
+// RevokeCredentials force-rotates a node's agent credentials (org-scoped): all
+// active credentials die now; the box must re-enroll to get a new one.
+func (s *Service) RevokeCredentials(ctx context.Context, orgID, nodeID uuid.UUID) (int, error) {
+	return s.repo.RevokeNodeCredentials(ctx, orgID, nodeID)
+}
+
 func (s *Service) List(ctx context.Context, orgID uuid.UUID) ([]NodeView, error) {
 	return s.repo.ListNodes(ctx, orgID)
 }

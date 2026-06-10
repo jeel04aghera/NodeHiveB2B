@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	grpcinsecure "google.golang.org/grpc/credentials/insecure"
@@ -32,6 +34,7 @@ import (
 	"github.com/nodehive/gpu-platform/internal/ops"
 	"github.com/nodehive/gpu-platform/internal/platform/config"
 	"github.com/nodehive/gpu-platform/internal/platform/db"
+	"github.com/nodehive/gpu-platform/internal/platform/tlsboot"
 	"github.com/nodehive/gpu-platform/internal/policy"
 	"github.com/nodehive/gpu-platform/internal/telemetry"
 	"github.com/nodehive/gpu-platform/internal/workloads"
@@ -116,7 +119,7 @@ func main() {
 	go runMeterSweep(ctx, billingSvc, log)
 
 	// ── gRPC agent gateway ────────────────────────────────────────────────────
-	grpcCreds, err := grpcServerCreds(cfg)
+	grpcCreds, agentCAPEM, err := grpcServerCreds(ctx, cfg, pool, log)
 	if err != nil {
 		log.Error("gRPC TLS", "err", err)
 		os.Exit(1)
@@ -152,6 +155,7 @@ func main() {
 			httpapi.WithRefreshCookieTTL(cfg.Auth.RefreshTokenTTL),
 			httpapi.WithEmailSender(email.NewSender(cfg.Email.ResendAPIKey, cfg.Email.FromEmail, log)),
 			httpapi.WithSelfTopup(cfg.Billing.AllowSelfTopup),
+			httpapi.WithAgentTransport(!cfg.GRPC.Insecure, agentCAPEM),
 		),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -173,19 +177,66 @@ func main() {
 	grpcSrv.GracefulStop()
 }
 
-func grpcServerCreds(cfg config.Config) (credentials.TransportCredentials, error) {
-	if cfg.GRPC.Insecure || cfg.GRPC.CertFile == "" {
-		return grpcinsecure.NewCredentials(), nil
+// grpcServerCreds resolves the agent-gateway transport, in order of preference:
+//
+//  1. GRPC_INSECURE=true   → plaintext (dev default; loud warning in production —
+//     this is also the rollback lever for the TLS rollout).
+//  2. GRPC_CERT_FILE set   → operator-provided certificate (own domain + Let's
+//     Encrypt / corporate PKI). Agents verify with system roots; no pinned CA.
+//  3. otherwise (auto)     → self-signed CA persisted in Postgres signs a per-boot
+//     server cert whose SANs cover AGENT_PUBLIC_GRPC_ADDR. The CA PEM is returned
+//     so the HTTP API can distribute it to agents over the HTTPS edge.
+func grpcServerCreds(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, log *slog.Logger) (credentials.TransportCredentials, []byte, error) {
+	if cfg.GRPC.Insecure {
+		if !cfg.IsDev() {
+			log.Warn("SECURITY: agent gRPC is PLAINTEXT in production (GRPC_INSECURE=true) — " +
+				"enrollment tokens, agent credentials and SSH passwords cross the network unencrypted; " +
+				"unset GRPC_INSECURE to enable TLS")
+		}
+		return grpcinsecure.NewCredentials(), nil, nil
 	}
-	cert, err := tls.LoadX509KeyPair(cfg.GRPC.CertFile, cfg.GRPC.KeyFile)
+	if cfg.GRPC.CertFile != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.GRPC.CertFile, cfg.GRPC.KeyFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load TLS cert: %w", err)
+		}
+		log.Info("agent gRPC TLS: operator-provided certificate", "cert", cfg.GRPC.CertFile)
+		return credentials.NewTLS(&tls.Config{
+			Certificates: []tls.Certificate{cert},
+			ClientAuth:   tls.NoClientCert,
+			MinVersion:   tls.VersionTLS13,
+		}), nil, nil
+	}
+
+	ca, err := tlsboot.EnsureCA(ctx, pool)
 	if err != nil {
-		return nil, fmt.Errorf("load TLS cert: %w", err)
+		return nil, nil, fmt.Errorf("transport CA: %w", err)
 	}
-	return credentials.NewTLS(&tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.NoClientCert,
-		MinVersion:   tls.VersionTLS13,
-	}), nil
+	hosts := []string{}
+	if h := hostOnly(cfg.AgentPublicGRPCAddr); h != "" {
+		hosts = append(hosts, h)
+	}
+	if hn, err := os.Hostname(); err == nil {
+		hosts = append(hosts, hn)
+	}
+	tlsCfg, err := ca.ServerTLS(hosts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("mint server cert: %w", err)
+	}
+	log.Info("agent gRPC TLS: auto (DB-persisted CA, per-boot server cert)",
+		"ca_sha256", ca.FingerprintSHA256(), "sans", hosts)
+	return credentials.NewTLS(tlsCfg), ca.CertPEM, nil
+}
+
+// hostOnly strips an optional :port from host:port.
+func hostOnly(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		return h
+	}
+	return addr
 }
 
 func runOfflineSweep(ctx context.Context, inv inventory.Service, wls workloads.Service, log *slog.Logger) {

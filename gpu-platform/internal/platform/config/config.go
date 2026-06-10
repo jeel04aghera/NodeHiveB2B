@@ -15,10 +15,17 @@ import (
 type DBConfig struct{ URL string }
 type HTTPConfig struct{ Addr string }
 type GRPCConfig struct {
-	Addr     string
-	Insecure bool   // dev only: serve gRPC without TLS
-	CertFile string // TLS server certificate (PEM)
-	KeyFile  string // TLS private key (PEM)
+	Addr string
+	// Insecure serves the agent gateway WITHOUT TLS. Default: true in dev, FALSE in
+	// production — a prod deploy gets TLS unless the operator explicitly opts out
+	// (GRPC_INSECURE=true is also the rollback lever).
+	Insecure bool
+	// CertFile/KeyFile use an operator-provided certificate (own domain + Let's
+	// Encrypt / corporate PKI). When unset and TLS is on, the control plane runs in
+	// auto mode: a self-signed CA persisted in the database signs a per-boot server
+	// cert, and agents pin the CA fetched over the HTTPS edge.
+	CertFile string
+	KeyFile  string
 }
 type AuthConfig struct {
 	JWTSecret  string
@@ -79,6 +86,10 @@ type Config struct {
 	Billing            BillingConfig
 	AppBaseURL         string   // frontend origin the OAuth callback redirects back to
 	CORSAllowedOrigins []string // explicit allow-list; empty => permissive "*" (dev only, no credentials)
+	// AgentPublicGRPCAddr is the host:port agents reach the gRPC gateway at (e.g. the
+	// Railway TCP proxy endpoint). Baked into install.sh AND used as the TLS server
+	// certificate's SAN, so the agent's hostname verification matches what it dials.
+	AgentPublicGRPCAddr string
 	DevOrgSlug         string   // org that dev nodes enroll into (matches scripts/seed_dev.sql)
 	DevEnrollmentToken string   // if set AND dev mode, control plane seeds this token on startup
 	DevBootstrapAdmin  string   // email:password to seed on first run (dev mode only)
@@ -93,7 +104,6 @@ func Load() (Config, error) {
 		HTTP: HTTPConfig{Addr: env("HTTP_ADDR", ":8080")},
 		GRPC: GRPCConfig{
 			Addr:     env("GRPC_ADDR", ":9090"),
-			Insecure: envBool("GRPC_INSECURE", true),
 			CertFile: env("GRPC_CERT_FILE", ""),
 			KeyFile:  env("GRPC_KEY_FILE", ""),
 		},
@@ -107,14 +117,17 @@ func Load() (Config, error) {
 			ResendAPIKey: env("RESEND_API_KEY", ""),
 			FromEmail:    env("INVITE_FROM_EMAIL", ""),
 		},
-		AppBaseURL:         strings.TrimRight(env("APP_BASE_URL", ""), "/"),
-		CORSAllowedOrigins: splitNonEmpty(env("CORS_ALLOWED_ORIGINS", "")),
+		AppBaseURL:          strings.TrimRight(env("APP_BASE_URL", ""), "/"),
+		CORSAllowedOrigins:  splitNonEmpty(env("CORS_ALLOWED_ORIGINS", "")),
+		AgentPublicGRPCAddr: env("AGENT_PUBLIC_GRPC_ADDR", ""),
 		DevOrgSlug:         env("DEV_ORG_SLUG", "dev"),
 		DevEnrollmentToken: env("DEV_ENROLLMENT_TOKEN", "dev-enroll-token"),
 		DevBootstrapAdmin:  env("DEV_BOOTSTRAP_ADMIN", "admin@dev.local:admin123"),
 	}
-	// Billing defaults depend on the resolved mode (dev keeps the frictionless
-	// local experience; production fails closed).
+	// Mode-dependent defaults (dev keeps the frictionless local experience;
+	// production fails closed). gRPC: plaintext is the dev default only — production
+	// serves TLS unless GRPC_INSECURE=true is set explicitly (the rollback lever).
+	c.GRPC.Insecure = envBool("GRPC_INSECURE", c.IsDev())
 	devWelcome := 0.0
 	if c.IsDev() {
 		devWelcome = 50000

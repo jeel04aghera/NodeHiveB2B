@@ -54,6 +54,13 @@ type API struct {
 	// Default FALSE: until a payment provider is integrated, self-topup is free money —
 	// production grants go through the operator. Dev/self-host enable it via config.
 	allowSelfTopup bool
+
+	// Agent transport (Phase 3). grpcTLS tells the installer whether the gateway
+	// speaks TLS; agentCAPEM is the pinned CA distributed at /api/v1/agent/ca when
+	// the deployment runs in auto-CA mode (empty when using an operator cert, where
+	// agents verify with system roots instead).
+	grpcTLS    bool
+	agentCAPEM []byte
 }
 
 // Option configures optional API features without breaking existing NewRouter callers.
@@ -80,6 +87,13 @@ func WithEmailSender(s email.Sender) Option { return func(a *API) { a.email = s 
 
 // WithSelfTopup enables the self-serve credit top-up endpoint (dev/self-host only).
 func WithSelfTopup(b bool) Option { return func(a *API) { a.allowSelfTopup = b } }
+
+// WithAgentTransport describes the agent gateway's transport so the installer and
+// the CA endpoint render the matching agent configuration. caPEM may be nil
+// (plaintext dev, or operator-provided certificate verified via system roots).
+func WithAgentTransport(tlsEnabled bool, caPEM []byte) Option {
+	return func(a *API) { a.grpcTLS, a.agentCAPEM = tlsEnabled, caPEM }
+}
 
 func NewRouter(
 	nodesSvc *nodes.Service,
@@ -117,6 +131,9 @@ func NewRouter(
 	// Agent distribution (public): one-line installer + prebuilt binaries.
 	r.Get("/install.sh", a.installScript)
 	r.Handle("/dist/*", http.StripPrefix("/dist/", http.FileServer(http.Dir(agentDistDir()))))
+	// Transport CA (public, auto-TLS mode only): served over the WebPKI-authenticated
+	// HTTPS edge, this is the agent's trust bootstrap for the pinned gRPC CA.
+	r.Get("/api/v1/agent/ca", a.agentCA)
 
 	// Per-IP limiters for credential-sensitive endpoints (H3). Sized to never bother a
 	// human (or the SPA's single-flight refresh) while killing brute force: bcrypt at
@@ -173,6 +190,10 @@ func NewRouter(
 				r.Get("/nodes", a.listNodes)
 				r.Get("/nodes/{id}", a.getNode)
 				r.Get("/nodes/{id}/gpus", a.listNodeGPUs)
+				// Credential rotation (admin): kill a node's agent credentials so a
+				// lost/compromised box must re-enroll with a fresh token.
+				r.With(a.requireRole(domain.RoleAdmin)).
+					Post("/nodes/{id}/revoke-credentials", a.revokeNodeCredentials)
 
 				// GPUs
 				r.Get("/gpus", a.listGPUs)
@@ -400,6 +421,34 @@ func (a *API) getNode(w http.ResponseWriter, r *http.Request) {
 		"gpus":              gpus,
 		"running_workloads": d.RunningWorkloads,
 	})
+}
+
+// revokeNodeCredentials force-rotates a node's agent credentials (admin, org-scoped).
+// The node's open stream survives until it drops (auth happens at stream start), but
+// every reconnect attempt fails until the box re-enrolls with a fresh token.
+func (a *API) revokeNodeCredentials(w http.ResponseWriter, r *http.Request) {
+	id := parseUUID(w, r, "id")
+	if id == uuid.Nil {
+		return
+	}
+	u := userFromCtx(r)
+	n, err := a.nodes.RevokeCredentials(r.Context(), u.OrgID, id)
+	if errors.Is(err, nodes.ErrNotFound) {
+		writeErr(w, 404, "not_found", "node not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, "internal", "could not revoke credentials")
+		return
+	}
+	go func() {
+		_ = a.audit.Record(context.Background(), domain.AuditLog{
+			OrgID: u.OrgID, ActorType: "user", ActorID: u.ID.String(),
+			Action: "node.revoke_credentials", TargetType: "node", TargetID: id.String(),
+			Metadata: map[string]any{"revoked": n},
+		})
+	}()
+	writeJSON(w, 200, map[string]any{"revoked": n})
 }
 
 func nodeLastSeen(t *time.Time) any {

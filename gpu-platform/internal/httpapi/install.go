@@ -53,6 +53,44 @@ func publicGRPCAddr(host string) (addr string, derived bool) {
 	return h + ":9090", true
 }
 
+// agentCA serves the transport CA certificate for agent pinning (auto-TLS mode).
+// Public by design: the CA cert is not a secret — trust comes from THIS endpoint
+// being reached over the WebPKI-authenticated HTTPS edge. 404 when the gateway is
+// plaintext (dev) or uses an operator certificate (agents verify via system roots).
+func (a *API) agentCA(w http.ResponseWriter, _ *http.Request) {
+	if len(a.agentCAPEM) == 0 {
+		writeErr(w, 404, "not_found", "this deployment does not use a pinned transport CA")
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.WriteHeader(200)
+	_, _ = w.Write(a.agentCAPEM)
+}
+
+// tlsBootstrapSnippet renders the installer's transport setup, matching the
+// gateway's actual mode so the agent never has to guess:
+//   - plaintext (dev)        → --insecure
+//   - auto-CA TLS            → fetch the CA over HTTPS and pin it (fail closed: a
+//     failed CA fetch aborts the install rather than downgrading to plaintext)
+//   - operator-cert TLS      → no flags (system roots verify the public cert)
+func (a *API) tlsBootstrapSnippet() string {
+	switch {
+	case !a.grpcTLS:
+		return `TLSARGS="--insecure"`
+	case len(a.agentCAPEM) > 0:
+		return `echo "▸ Fetching the control plane transport CA (pinned for gRPC TLS)…"
+if ! curl -fL $CURLOPTS "$NH_HTTP/api/v1/agent/ca" -o "$DIR/ca.pem" </dev/null \
+   || ! grep -q "BEGIN CERTIFICATE" "$DIR/ca.pem"; then
+  echo "error: could not fetch the transport CA from $NH_HTTP/api/v1/agent/ca" >&2
+  echo "  This control plane requires TLS; refusing to fall back to plaintext." >&2
+  exit 1
+fi
+TLSARGS="--ca $DIR/ca.pem"`
+	default:
+		return `TLSARGS=""  # TLS with a publicly-trusted certificate (system roots)`
+	}
+}
+
 // installScript serves a self-contained one-line installer:
 //
 //	curl -fsSL <cp>/install.sh | sh -s -- --token <TOKEN>
@@ -80,7 +118,7 @@ echo "  on the control plane to that host:port (e.g. a Railway TCP Proxy endpoin
 	}
 
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
-	fmt.Fprintf(w, installTemplate, httpBase, grpc, warn, agentDownloadBase(httpBase))
+	fmt.Fprintf(w, installTemplate, httpBase, grpc, warn, agentDownloadBase(httpBase), a.tlsBootstrapSnippet())
 }
 
 const installTemplate = `#!/bin/sh
@@ -144,6 +182,9 @@ DIR="$HOME/.nodehive"
 BIN="$DIR/nodehive-agent"
 mkdir -p "$DIR"
 
+# Transport security — rendered by the control plane to match its gRPC mode.
+%[5]s
+
 ARTIFACT="agent-$OS-$ARCH"
 URL="$DLBASE/$ARTIFACT"
 echo "▸ Detected $PRETTY ($PLATFORM)."
@@ -206,7 +247,7 @@ mv -f "$TMP" "$BIN"
 echo "▸ Downloaded $GOT bytes → $BIN"
 
 echo "▸ Enrolling with the control plane (gRPC $SERVER) and starting the agent…"
-echo "  command: $BIN --server $SERVER --insecure --token <redacted> $DEV"
+echo "  command: $BIN --server $SERVER $TLSARGS --token <redacted> $DEV"
 echo "  (leave this running; the node stays online while the agent runs)"
-exec "$BIN" --server "$SERVER" --insecure --token "$TOKEN" $DEV
+exec "$BIN" --server "$SERVER" $TLSARGS --token "$TOKEN" $DEV
 `

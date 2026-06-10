@@ -256,6 +256,28 @@ func (r *Repo) OrgIDBySlug(ctx context.Context, slug string) (uuid.UUID, error) 
 	return id, err
 }
 
+// RevokeNodeCredentials revokes every active credential for a node, scoped to the
+// caller's org. The node's next reconnect fails authentication and it must
+// re-enroll with a fresh token (which mints — and persists — a new credential).
+// Returns ErrNotFound when the node isn't in the org (no cross-tenant revocation).
+func (r *Repo) RevokeNodeCredentials(ctx context.Context, orgID, nodeID uuid.UUID) (int, error) {
+	var exists bool
+	if err := r.pool.QueryRow(ctx,
+		`SELECT exists(SELECT 1 FROM gpu_nodes WHERE id=$1 AND org_id=$2)`, nodeID, orgID).Scan(&exists); err != nil {
+		return 0, err
+	}
+	if !exists {
+		return 0, ErrNotFound
+	}
+	ct, err := r.pool.Exec(ctx,
+		`UPDATE agent_credentials SET revoked_at=now()
+		   WHERE node_id=$1 AND revoked_at IS NULL`, nodeID)
+	if err != nil {
+		return 0, err
+	}
+	return int(ct.RowsAffected()), nil
+}
+
 // EnsureEnrollmentToken upserts a token by hash (used to seed the dev token).
 func (r *Repo) EnsureEnrollmentToken(ctx context.Context, orgID uuid.UUID, tokenHash string, expiresAt time.Time, maxUses int) error {
 	_, err := r.pool.Exec(ctx,
