@@ -40,6 +40,36 @@ type Service interface {
 	// BootstrapAdmin creates an admin from "email:password" if the org has no users.
 	BootstrapAdmin(ctx context.Context, spec string) error
 
+	// ── API keys & service accounts (Phase 6) ─────────────────────────────────
+	// CreateAPIKey mints a programmatic credential; the raw value is returned ONCE
+	// and only its SHA-256 is stored.
+	CreateAPIKey(ctx context.Context, orgID uuid.UUID, req APIKeyRequest) (raw string, key domain.APIKey, err error)
+	// ListAPIKeys lists an org's keys; ownerUserID narrows to one user's keys.
+	ListAPIKeys(ctx context.Context, orgID uuid.UUID, ownerUserID *uuid.UUID) ([]domain.APIKey, error)
+	// RevokeAPIKey tombstones a key; ownerUserID (when set) restricts to own keys.
+	RevokeAPIKey(ctx context.Context, orgID, keyID uuid.UUID, ownerUserID *uuid.UUID) error
+	// AuthenticateAPIKey resolves a raw nhk_ bearer to a principal (user or
+	// service-account); all failures return ErrAPIKeyInvalid.
+	AuthenticateAPIKey(ctx context.Context, raw string) (domain.User, error)
+	CreateServiceAccount(ctx context.Context, orgID, createdBy uuid.UUID, name, description string, role domain.Role) (domain.ServiceAccount, error)
+	ListServiceAccounts(ctx context.Context, orgID uuid.UUID) ([]domain.ServiceAccount, error)
+	// SetServiceAccountDisabled disables (true) / re-enables (false) an SA; disabling
+	// instantly invalidates all of its API keys.
+	SetServiceAccountDisabled(ctx context.Context, orgID, id uuid.UUID, disabled bool) error
+
+	// ── Email verification & password reset (Phase 6) ─────────────────────────
+	// RequestEmailVerification mints a single-use verify token (raw returned for
+	// delivery; only the hash is stored).
+	RequestEmailVerification(ctx context.Context, userID uuid.UUID) (raw string, user domain.User, err error)
+	// ConfirmEmailVerification consumes a verify token and marks the email verified.
+	ConfirmEmailVerification(ctx context.Context, raw string) (domain.User, error)
+	// RequestPasswordReset mints a reset token for the account with that email.
+	// Unknown emails return ErrNotFound — the HTTP layer hides this (no enumeration).
+	RequestPasswordReset(ctx context.Context, email string) (raw string, user domain.User, err error)
+	// ConfirmPasswordReset consumes a reset token, sets the new password and revokes
+	// every session (a reset is a credential-compromise response).
+	ConfirmPasswordReset(ctx context.Context, raw, newPassword string) (domain.User, error)
+
 	// ── Session management (Phase 2) ──────────────────────────────────────────
 	// IssueAccessToken mints a short-lived Bearer access token for a user (no session
 	// row). Used when rotating a refresh token to hand back a fresh access token.

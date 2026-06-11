@@ -104,3 +104,39 @@ func BuildInviteEmail(to, orgName, role, acceptURL string) Message {
 </div>`, safeOrg, safeOrg, safeRole, safeURL, safeURL, safeURL)
 	return Message{To: to, Subject: subject, HTML: htmlBody, Text: text}
 }
+
+// buildLinkEmail is the shared layout for single-action emails (verify, reset).
+func buildLinkEmail(to, subject, heading, body, cta, url, footer string) Message {
+	safeURL := html.EscapeString(url)
+	text := fmt.Sprintf("%s\n\n%s:\n%s\n\n%s", body, cta, url, footer)
+	htmlBody := fmt.Sprintf(`<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:480px;margin:0 auto;color:#1a1a1a">
+  <h2 style="font-weight:600">%s</h2>
+  <p>%s</p>
+  <p style="margin:24px 0">
+    <a href="%s" style="background:#1a1a1a;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;display:inline-block">%s</a>
+  </p>
+  <p style="color:#666;font-size:13px">Or paste this link into your browser:<br><a href="%s">%s</a></p>
+  <p style="color:#999;font-size:12px;margin-top:24px">%s</p>
+</div>`, html.EscapeString(heading), html.EscapeString(body), safeURL, html.EscapeString(cta), safeURL, safeURL, html.EscapeString(footer))
+	return Message{To: to, Subject: subject, HTML: htmlBody, Text: text}
+}
+
+// BuildVerifyEmail renders the email-address verification message.
+func BuildVerifyEmail(to, verifyURL string) Message {
+	return buildLinkEmail(to,
+		"Verify your email address for NodeHive",
+		"Verify your email",
+		"Confirm this email address to finish setting up your NodeHive account. The link expires in 24 hours.",
+		"Verify email", verifyURL,
+		"If you didn't create a NodeHive account, you can safely ignore this email.")
+}
+
+// BuildPasswordResetEmail renders the password-reset message.
+func BuildPasswordResetEmail(to, resetURL string) Message {
+	return buildLinkEmail(to,
+		"Reset your NodeHive password",
+		"Reset your password",
+		"We received a request to reset the password for this account. The link expires in 1 hour and can be used once.",
+		"Reset password", resetURL,
+		"If you didn't request a reset, you can ignore this email — your password is unchanged.")
+}

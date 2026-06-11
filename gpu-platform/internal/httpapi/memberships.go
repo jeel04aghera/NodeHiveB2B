@@ -84,6 +84,7 @@ func (a *API) changeMemberRole(w http.ResponseWriter, r *http.Request) {
 	}
 	a.userEvent(r, u, "member.role_change", "user", target.String(),
 		map[string]any{"new_role": body.Role})
+	a.notifyMembers(u.OrgID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -99,6 +100,7 @@ func (a *API) removeMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.userEvent(r, u, "member.remove", "user", target.String(), nil)
+	a.notifyMembers(u.OrgID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -132,6 +134,7 @@ func (a *API) createInvitation(w http.ResponseWriter, r *http.Request) {
 	a.dispatchInviteEmail(inv, raw) // async; creation already succeeded
 	a.userEvent(r, u, "invitation.create", "invitation", inv.ID.String(),
 		map[string]any{"email": body.Email, "role": string(inv.Role)})
+	a.notifyMembers(u.OrgID)
 	// In dev (email disabled) we still return the shareable invite token + accept link so
 	// the admin can deliver it manually. In prod the email carries the link.
 	writeJSON(w, 201, a.inviteResponse(inv, raw))
@@ -210,6 +213,7 @@ func (a *API) leaveOrg(w http.ResponseWriter, r *http.Request) {
 	}
 	// Attributed to the org being left (u.OrgID, captured before the leave).
 	a.userEvent(r, u, "org.leave", "organization", u.OrgID.String(), nil)
+	a.notifyMembers(u.OrgID)
 	// The user is now pre-onboarding; hand back a fresh org-less token for the SPA to adopt.
 	writeJSON(w, 200, map[string]any{"token": token, "user": userResponse(user)})
 }
@@ -233,6 +237,7 @@ func (a *API) transferOwnership(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.userEvent(r, u, "org.transfer_ownership", "user", target.String(), nil)
+	a.notifyMembers(u.OrgID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -248,6 +253,7 @@ func (a *API) revokeInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.userEvent(r, u, "invitation.revoke", "invitation", id.String(), nil)
+	a.notifyMembers(u.OrgID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -287,6 +293,7 @@ func (a *API) acceptInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 	// Attributed to the org the user just joined (user.OrgID is set post-accept).
 	a.userEvent(r, user, "invitation.accept", "organization", user.OrgID.String(), nil)
+	a.notifyMembers(user.OrgID)
 	writeJSON(w, 200, map[string]any{"token": token, "user": userResponse(user)})
 }
 
@@ -355,6 +362,7 @@ func (a *API) joinViaCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.userEvent(r, user, "join_code.join", "organization", user.OrgID.String(), nil)
+	a.notifyMembers(user.OrgID)
 	writeJSON(w, 200, map[string]any{"token": token, "user": userResponse(user)})
 }
 
@@ -380,6 +388,7 @@ func (a *API) registerPending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.startSession(w, r, user.ID) // additive: also sets the refresh cookie
+	a.sendVerificationEmail(user) // Phase 6: kick off email verification
 	a.userEvent(r, user, "auth.register", "user", user.ID.String(),
 		map[string]any{"method": "password", "pending": true})
 	writeJSON(w, 201, map[string]any{"token": token, "user": userResponse(user)})

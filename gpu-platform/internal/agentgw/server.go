@@ -34,6 +34,17 @@ type Server struct {
 	dispatcher   *Dispatcher
 	delivery     *DeliveryEngine
 	log          *slog.Logger
+	publish      func(orgID uuid.UUID, topics ...string) // optional realtime hints (Phase 6)
+}
+
+// SetEventPublisher wires realtime cache-invalidation hints for node lifecycle
+// (connect/disconnect/inventory). Optional; nil = no-op.
+func (s *Server) SetEventPublisher(pub func(orgID uuid.UUID, topics ...string)) { s.publish = pub }
+
+func (s *Server) notify(orgID uuid.UUID, topics ...string) {
+	if s.publish != nil && orgID != uuid.Nil {
+		s.publish(orgID, topics...)
+	}
 }
 
 func NewServer(
@@ -108,6 +119,7 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessage, a
 	// Register dispatch channel so the control plane can push commands.
 	cmdCh, kicked := s.dispatcher.Register(ai.NodeID)
 	s.log.Info("agent connected", "node_id", ai.NodeID)
+	s.notify(ai.OrgID, "nodes")
 
 	defer func() {
 		// Only mark offline if we were still the active stream. A reconnect may have
@@ -115,6 +127,7 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessage, a
 		if s.dispatcher.Deregister(ai.NodeID, cmdCh) {
 			_ = s.nodeSvc.MarkOffline(context.Background(), ai.NodeID)
 			s.log.Info("agent disconnected", "node_id", ai.NodeID)
+			s.notify(ai.OrgID, "nodes")
 		}
 	}()
 
@@ -235,7 +248,9 @@ func (s *Server) handleInventory(ctx context.Context, ai authInfo, inv *nodev1.I
 	}
 	if err := s.inventorySvc.UpsertInventory(ctx, ai.NodeID, node, gpus); err != nil {
 		s.log.Error("upsert inventory failed", "node_id", ai.NodeID, "err", err)
+		return
 	}
+	s.notify(ai.OrgID, "nodes")
 }
 
 func (s *Server) handleMetricsBatch(ctx context.Context, ai authInfo, batch *metricsv1.MetricsBatch) {

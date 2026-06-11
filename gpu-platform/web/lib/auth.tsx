@@ -10,6 +10,7 @@ export interface CurrentUser {
   role: string;
   avatar_url?: string;
   auth_provider?: string;
+  email_verified?: boolean;
   onboarded?: boolean;
 }
 

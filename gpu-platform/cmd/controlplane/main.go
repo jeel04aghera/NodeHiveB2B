@@ -28,6 +28,7 @@ import (
 	"github.com/nodehive/gpu-platform/internal/billing"
 	"github.com/nodehive/gpu-platform/internal/domain"
 	"github.com/nodehive/gpu-platform/internal/email"
+	"github.com/nodehive/gpu-platform/internal/events"
 	"github.com/nodehive/gpu-platform/internal/httpapi"
 	"github.com/nodehive/gpu-platform/internal/identity"
 	"github.com/nodehive/gpu-platform/internal/inventory"
@@ -99,6 +100,9 @@ func main() {
 	inventorySvc := inventory.NewService(pool)
 	billingSvc := billing.NewService(pool, billing.WithEnforcement(cfg.Billing.Enforce))
 	auditSvc := audit.NewService(pool)
+	// Realtime hub (Phase 6): org-scoped SSE cache-invalidation hints. In-process,
+	// like the agent dispatcher — multi-replica needs a pub/sub bridge behind it.
+	eventHub := events.NewHub()
 	workloadsSvc := workloads.NewService(pool, deliveryEngine, billingSvc,
 		// System/agent lifecycle transitions (sweep reclaims, idle stops, agent-reported
 		// terminal states) land in the same tamper-evident audit trail as user actions.
@@ -106,7 +110,8 @@ func main() {
 			if err := auditSvc.Record(c, e); err != nil {
 				log.Warn("audit record failed", "action", e.Action, "err", err)
 			}
-		}))
+		}),
+		workloads.WithEvents(eventHub.PublishTopics))
 	telemetrySvc := telemetry.NewService(pool, telemetry.WithRawRetention(cfg.Retention.RawMetrics))
 	policySvc := policy.NewService(pool)
 	opsSvc := ops.New(pool)
@@ -190,8 +195,9 @@ func main() {
 			Timeout: 10 * time.Second,
 		}),
 	)
-	agentv1.RegisterAgentServiceServer(grpcSrv,
-		agentgw.NewServer(nodeSvc, inventorySvc, telemetrySvc, workloadsSvc, auditSvc, dispatcher, deliveryEngine, log))
+	agentSrv := agentgw.NewServer(nodeSvc, inventorySvc, telemetrySvc, workloadsSvc, auditSvc, dispatcher, deliveryEngine, log)
+	agentSrv.SetEventPublisher(eventHub.PublishTopics) // node connect/disconnect/inventory → SSE
+	agentv1.RegisterAgentServiceServer(grpcSrv, agentSrv)
 	lis, err := net.Listen("tcp", cfg.GRPC.Addr)
 	if err != nil {
 		log.Error("grpc listen", "err", err)
@@ -222,6 +228,7 @@ func main() {
 			httpapi.WithLogger(log),
 			httpapi.WithHealth(health),
 			httpapi.WithMetrics(metrics, cfg.Obs.MetricsToken),
+			httpapi.WithEventHub(eventHub),
 		),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

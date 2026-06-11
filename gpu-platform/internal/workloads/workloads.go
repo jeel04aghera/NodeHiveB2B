@@ -28,6 +28,11 @@ type ListFilter struct {
 	Status    domain.WorkloadState
 	UserID    *uuid.UUID
 	ProjectID *uuid.UUID
+	// Viewer enables project-level isolation (Phase 6): when set and ViewerIsAdmin
+	// is false, workloads in restricted projects the viewer doesn't belong to are
+	// hidden (own workloads always remain visible).
+	Viewer        *uuid.UUID
+	ViewerIsAdmin bool
 }
 
 // WorkloadGPU is one GPU attached to a workload.

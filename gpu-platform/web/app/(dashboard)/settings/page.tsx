@@ -15,6 +15,7 @@ import {
 } from "@/components/ui";
 import { SecuritySessions } from "@/components/SecuritySessions";
 import { OrgMembers } from "@/components/OrgMembers";
+import { APIAccess } from "@/components/APIAccess";
 
 // Admin tabs gate behind admin/owner; Security (own sessions) is available to everyone.
 const ADMIN_TABS = [
@@ -26,13 +27,14 @@ const ADMIN_TABS = [
   { key: "enrollment", label: "Node Enrollment" },
 ];
 const SECURITY_TAB = { key: "security", label: "Security" };
+const API_TAB = { key: "api", label: "API" }; // personal API keys: every member
 
 function SettingsContent() {
   const { user } = useAuth();
   const isAdmin = isAdminRole(user?.role);
   const router = useRouter();
   const search = useSearchParams();
-  const TABS = isAdmin ? [...ADMIN_TABS, SECURITY_TAB] : [SECURITY_TAB];
+  const TABS = isAdmin ? [...ADMIN_TABS, API_TAB, SECURITY_TAB] : [API_TAB, SECURITY_TAB];
   const defaultTab = isAdmin ? "general" : "security";
   const tab = TABS.some((t) => t.key === search.get("tab")) ? (search.get("tab") as string) : defaultTab;
   const setTab = (k: string) => router.push(k === "general" ? "/settings" : `/settings?tab=${k}`);
@@ -66,13 +68,13 @@ function SettingsContent() {
   async function handleCreateDept(e: React.FormEvent) { e.preventDefault(); if (!deptForm.name) return; await createDept.mutateAsync(deptForm); setDeptForm({ name: "", description: "" }); }
   async function handleIssueToken() { const res = await issueToken.mutateAsync(tokenForm); setToken(res.token); }
 
-  // Non-admins still manage their own active sessions under Security.
+  // Non-admins manage their own sessions + API keys.
   if (!isAdmin) {
     return (
       <div className="space-y-6">
-        <PageHeader title="Settings" description="Manage your account security." />
+        <PageHeader title="Settings" description="Manage your account security and API access." />
         <Tabs items={TABS} value={tab} onChange={setTab} />
-        <SecuritySessions />
+        {tab === "api" ? <APIAccess /> : <SecuritySessions />}
       </div>
     );
   }
@@ -83,6 +85,8 @@ function SettingsContent() {
       <Tabs items={TABS} value={tab} onChange={setTab} />
 
       {tab === "security" && <SecuritySessions />}
+
+      {tab === "api" && <APIAccess />}
 
       {tab === "general" && (
         <div className="grid gap-4 lg:grid-cols-2">

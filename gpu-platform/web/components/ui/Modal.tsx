@@ -7,17 +7,23 @@ export function Modal({
   onClose,
   children,
   maxWidth = "max-w-lg",
+  open = true,
 }: {
   title: React.ReactNode;
   onClose: () => void;
   children: React.ReactNode;
   maxWidth?: string;
+  /** When false the modal renders nothing — callers can keep it mounted instead of conditional JSX. */
+  open?: boolean;
 }) {
   useEffect(() => {
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [open, onClose]);
+
+  if (!open) return null;
 
   return (
     <div

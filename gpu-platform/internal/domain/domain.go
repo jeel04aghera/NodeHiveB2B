@@ -108,10 +108,22 @@ type User struct {
 	AuthProvider  string // 'password' | 'google'
 	LastLoginAt   *time.Time
 	CreatedAt     time.Time
+	// IsServiceAccount marks a principal synthesized from a service-account API key
+	// (Phase 6). Such principals are API-only: no sessions, no password, audit
+	// actor_type "service_account". ID then refers to service_accounts.id.
+	IsServiceAccount bool
 }
 
 // Onboarded reports whether the user has joined/created an organization.
 func (u User) Onboarded() bool { return u.OrgID != uuid.Nil }
+
+// ActorType is the audit actor classification for this principal.
+func (u User) ActorType() string {
+	if u.IsServiceAccount {
+		return "service_account"
+	}
+	return "user"
+}
 
 // EnrollmentToken is an agent-enrollment credential record (raw token never stored).
 type EnrollmentToken struct {
@@ -196,10 +208,56 @@ type JoinCode struct {
 }
 
 type Project struct {
-	ID        uuid.UUID
-	OrgID     uuid.UUID
-	Name      string
-	CreatedAt time.Time
+	ID          uuid.UUID `json:"id"`
+	OrgID       uuid.UUID `json:"org_id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	// Visibility: 'open' (any org member) or 'restricted' (project members +
+	// org admins only — the client-isolation primitive, Phase 6).
+	Visibility string     `json:"visibility"`
+	CreatedBy  *uuid.UUID `json:"created_by,omitempty"`
+	ArchivedAt *time.Time `json:"archived_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// ProjectMember is a user granted access to a restricted project.
+type ProjectMember struct {
+	ProjectID uuid.UUID  `json:"project_id"`
+	UserID    uuid.UUID  `json:"user_id"`
+	Email     string     `json:"email"`
+	Name      string     `json:"name"`
+	AddedBy   *uuid.UUID `json:"added_by,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+// ServiceAccount is an org-scoped, API-only principal (Phase 6). It authenticates
+// exclusively through API keys; its role is capped at admin (never owner).
+type ServiceAccount struct {
+	ID          uuid.UUID  `json:"id"`
+	OrgID       uuid.UUID  `json:"org_id"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Role        Role       `json:"role"`
+	CreatedBy   *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	DisabledAt  *time.Time `json:"disabled_at,omitempty"`
+}
+
+// APIKey is the metadata of a programmatic credential. The raw key is never
+// stored — only its SHA-256; Prefix identifies a key without revealing it.
+type APIKey struct {
+	ID               uuid.UUID  `json:"id"`
+	OrgID            uuid.UUID  `json:"org_id"`
+	Name             string     `json:"name"`
+	Prefix           string     `json:"prefix"`
+	UserID           *uuid.UUID `json:"user_id,omitempty"`
+	ServiceAccountID *uuid.UUID `json:"service_account_id,omitempty"`
+	CreatedBy        *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	LastUsedAt       *time.Time `json:"last_used_at,omitempty"`
+	RevokedAt        *time.Time `json:"revoked_at,omitempty"`
+	Status           string     `json:"status"` // active | expired | revoked (computed)
 }
 
 // Department is the org structure unit. Users and workloads belong to a

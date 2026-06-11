@@ -25,6 +25,12 @@ export function setToken(t: string | null) {
   authToken = t;
 }
 
+// getToken exposes the current access token for transports that cannot use the
+// api() wrapper (the SSE EventSource cannot set an Authorization header).
+export function getToken(): string | null {
+  return authToken;
+}
+
 // AuthProvider registers these so api-client can persist a refreshed token and signal
 // when the session is irrecoverably lost (refresh failed) — keeps localStorage + React
 // state in sync without a circular import.

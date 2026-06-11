@@ -20,6 +20,7 @@ import (
 	"github.com/nodehive/gpu-platform/internal/billing"
 	"github.com/nodehive/gpu-platform/internal/domain"
 	"github.com/nodehive/gpu-platform/internal/email"
+	"github.com/nodehive/gpu-platform/internal/events"
 	"github.com/nodehive/gpu-platform/internal/identity"
 	"github.com/nodehive/gpu-platform/internal/inventory"
 	"github.com/nodehive/gpu-platform/internal/nodes"
@@ -77,6 +78,9 @@ type API struct {
 	health       *obs.Health
 	metrics      *obs.Metrics
 	metricsToken string
+
+	// Realtime (Phase 6): org-scoped SSE hub. nil = endpoint disabled.
+	events *events.Hub
 }
 
 // Option configures optional API features without breaking existing NewRouter callers.
@@ -130,6 +134,9 @@ func WithHealth(h *obs.Health) Option { return func(a *API) { a.health = h } }
 func WithMetrics(m *obs.Metrics, token string) Option {
 	return func(a *API) { a.metrics, a.metricsToken = m, token }
 }
+
+// WithEventHub enables the SSE realtime endpoint (Phase 6).
+func WithEventHub(h *events.Hub) Option { return func(a *API) { a.events = h } }
 
 func NewRouter(
 	nodesSvc *nodes.Service,
@@ -205,6 +212,16 @@ func NewRouter(
 		r.Get("/auth/google/start", a.googleStart)
 		r.With(loginLimiter.middleware).Get("/auth/google/callback", a.googleCallback)
 
+		// Email verification + password reset (Phase 6). Public confirm/request
+		// endpoints accept guessable secrets / probe accounts → rate-limited.
+		r.With(tokenProbeLimiter.middleware).Post("/auth/verify-email/confirm", a.confirmEmailVerification)
+		r.With(registerLimiter.middleware).Post("/auth/password-reset/request", a.requestPasswordReset)
+		r.With(tokenProbeLimiter.middleware).Post("/auth/password-reset/confirm", a.confirmPasswordReset)
+
+		// Realtime SSE feed (Phase 6). Auth happens inside the handler because
+		// EventSource cannot set an Authorization header (?token= fallback).
+		r.Get("/events/stream", a.eventStream)
+
 		// Authenticated routes
 		r.Group(func(r chi.Router) {
 			r.Use(a.authMiddleware)
@@ -216,6 +233,9 @@ func NewRouter(
 			// Token/code redemption is rate-limited: these accept guessable secrets.
 			r.With(tokenProbeLimiter.middleware).Post("/onboarding/accept-invitation", a.acceptInvitation)
 			r.With(tokenProbeLimiter.middleware).Post("/onboarding/join-code", a.joinViaCode)
+
+			// Resend verification (any authenticated human, incl. pre-onboarding).
+			r.With(tokenProbeLimiter.middleware).Post("/auth/verify-email/request", a.requestEmailVerification)
 
 			// Active session management (available to every authenticated user, incl.
 			// pre-onboarding — they still have devices/sessions to manage).
@@ -272,9 +292,34 @@ func NewRouter(
 				r.Get("/billing/ledger", a.creditLedger)
 				r.Post("/billing/credits/topup", a.topupCredits)
 
-				// Projects
+				// Projects (Phase 6: isolation — detail, settings, members)
 				r.Get("/projects", a.listProjects)
 				r.Post("/projects", a.createProject)
+				r.Get("/projects/{id}", a.getProject)
+				r.Get("/projects/{id}/members", a.listProjectMembers)
+				r.Group(func(r chi.Router) {
+					r.Use(a.requireRole(domain.RoleAdmin))
+					r.Patch("/projects/{id}", a.updateProject)
+					r.Post("/projects/{id}/members", a.addProjectMember)
+					r.Delete("/projects/{id}/members/{userId}", a.removeProjectMember)
+				})
+
+				// API keys (Phase 6). Members manage their own; admins see/revoke all.
+				// Service-account principals cannot mint or revoke credentials.
+				r.Get("/api-keys", a.listAPIKeys)
+				r.Group(func(r chi.Router) {
+					r.Use(a.blockServiceAccounts)
+					r.Post("/api-keys", a.createAPIKey)
+					r.Delete("/api-keys/{id}", a.revokeAPIKey)
+				})
+
+				// Service accounts (Phase 6, admin-only; humans only).
+				r.Group(func(r chi.Router) {
+					r.Use(a.requireRole(domain.RoleAdmin), a.blockServiceAccounts)
+					r.Get("/service-accounts", a.listServiceAccounts)
+					r.Post("/service-accounts", a.createServiceAccount)
+					r.Patch("/service-accounts/{id}", a.updateServiceAccount)
+				})
 
 				// Departments (org structure)
 				r.Get("/departments", a.listDepartments)
@@ -397,6 +442,7 @@ func (a *API) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.startSession(w, r, user.ID) // additive: also sets the refresh cookie
+	a.sendVerificationEmail(user) // Phase 6: kick off email verification
 	a.userEvent(r, user, "auth.register", "user", user.ID.String(), map[string]any{"method": "password"})
 	a.userEvent(r, user, "org.create", "organization", user.OrgID.String(),
 		map[string]any{"org_name": body.OrgName})
@@ -597,6 +643,10 @@ func (a *API) listWorkloads(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
 	f := workloads.ListFilter{
 		Status: domain.WorkloadState(r.URL.Query().Get("status")),
+		// Project isolation (Phase 6): hide restricted projects' workloads from
+		// non-members. Admins and owners see everything.
+		Viewer:        &u.ID,
+		ViewerIsAdmin: u.Role.AtLeast(domain.RoleAdmin),
 	}
 	list, err := a.workloads.List(r.Context(), u.OrgID, f)
 	if err != nil {
@@ -682,6 +732,26 @@ func (a *API) launchWorkload(w http.ResponseWriter, r *http.Request) {
 			req.ProjectID = &pid
 		}
 	}
+	// Project isolation (Phase 6): explicit project → the launcher must be allowed
+	// to use it (open, or restricted+member, or org admin; archived refuses all).
+	// No project → the workload lands in the org's Default project.
+	if req.ProjectID != nil {
+		if err := a.nodes.AuthorizeProjectUse(r.Context(), u.OrgID, *req.ProjectID, u.ID,
+			u.Role.AtLeast(domain.RoleAdmin)); err != nil {
+			if errors.Is(err, nodes.ErrNotFound) {
+				writeErr(w, 400, "validation", "unknown project")
+				return
+			}
+			if errors.Is(err, nodes.ErrProjectForbidden) {
+				writeErr(w, 403, "project_forbidden", err.Error())
+				return
+			}
+			writeErr(w, 500, "internal", "could not authorize project")
+			return
+		}
+	} else if pid, err := a.nodes.EnsureDefaultProject(r.Context(), u.OrgID); err == nil {
+		req.ProjectID = &pid
+	}
 	// Department: explicit, else inherit the launching user's department.
 	if body.DepartmentID != nil && *body.DepartmentID != "" {
 		if did, err := uuid.Parse(*body.DepartmentID); err == nil {
@@ -735,6 +805,12 @@ func (a *API) getWorkload(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeErr(w, 500, "internal", "could not get workload")
+		return
+	}
+	// Project isolation (Phase 6): restricted-project workloads are invisible
+	// (404, not 403 — existence is hidden) to non-members.
+	if !a.canViewWorkload(r, u, d.Workload) {
+		writeErr(w, 404, "not_found", "workload not found")
 		return
 	}
 	resp := workloadResponse(d.Workload, canViewWorkloadSecrets(u, d.Workload))
@@ -810,6 +886,10 @@ func (a *API) stopWorkload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not load workload")
 		return
 	}
+	if !a.canViewWorkload(r, u, wl) { // project isolation (Phase 6)
+		writeErr(w, 404, "not_found", "workload not found")
+		return
+	}
 	// A queued workload has no container yet — cancel it out of the queue (F3).
 	if wl.Status == domain.WorkloadQueued {
 		if err := a.workloads.CancelQueued(r.Context(), id); err != nil {
@@ -835,7 +915,7 @@ func (a *API) workloadLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	u := userFromCtx(r)
 	wl, err := a.workloads.Get(r.Context(), u.OrgID, id)
-	if err != nil {
+	if err != nil || !a.canViewWorkload(r, u, wl) {
 		writeErr(w, 404, "not_found", "workload not found")
 		return
 	}
@@ -852,7 +932,11 @@ func (a *API) workloadEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := userFromCtx(r)
-	events, err := a.workloads.ListEvents(r.Context(), u.OrgID, id)
+	if wl, err := a.workloads.Get(r.Context(), u.OrgID, id); err != nil || !a.canViewWorkload(r, u, wl) {
+		writeErr(w, 404, "not_found", "workload not found")
+		return
+	}
+	evs, err := a.workloads.ListEvents(r.Context(), u.OrgID, id)
 	if errors.Is(err, workloads.ErrNotFound) {
 		writeErr(w, 404, "not_found", "workload not found")
 		return
@@ -861,7 +945,7 @@ func (a *API) workloadEvents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", "could not query events")
 		return
 	}
-	writeJSON(w, 200, events)
+	writeJSON(w, 200, evs)
 }
 
 func (a *API) queue(w http.ResponseWriter, r *http.Request) {
@@ -1053,7 +1137,7 @@ func (a *API) topupCredits(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) listProjects(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
-	rows, err := a.nodes.ListProjects(r.Context(), u.OrgID)
+	rows, err := a.nodes.ListProjects(r.Context(), u.OrgID, u.ID)
 	if err != nil {
 		writeErr(w, 500, "internal", "could not list projects")
 		return
@@ -1064,13 +1148,14 @@ func (a *API) listProjects(w http.ResponseWriter, r *http.Request) {
 func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
 	var body struct {
-		Name string `json:"name"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		writeErr(w, 400, "validation", "name is required")
 		return
 	}
-	p, err := a.nodes.CreateProject(r.Context(), u.OrgID, body.Name)
+	p, err := a.nodes.CreateProject(r.Context(), u.OrgID, body.Name, body.Description, u.ID)
 	if err != nil {
 		writeErr(w, 500, "internal", "could not create project")
 		return
@@ -1204,7 +1289,8 @@ func (a *API) authMiddleware(next http.Handler) http.Handler {
 			writeErr(w, 401, "unauthorized", "missing bearer token")
 			return
 		}
-		u, err := a.identity.Authenticate(r.Context(), token)
+		// nhk_-prefixed bearers are API keys (Phase 6); everything else is a JWT.
+		u, err := a.authenticateToken(r.Context(), token)
 		if err != nil {
 			writeErr(w, 401, "unauthorized", "invalid or expired token")
 			return
@@ -1293,14 +1379,15 @@ func (a *API) originAllowed(origin string) bool {
 
 func userResponse(u domain.User) map[string]any {
 	r := map[string]any{
-		"id":            u.ID.String(),
-		"org_id":        nil, // null = pre-onboarding (set below when present)
-		"email":         u.Email,
-		"name":          u.Name,
-		"role":          u.Role,
-		"avatar_url":    u.AvatarURL,
-		"auth_provider": u.AuthProvider,
-		"onboarded":     u.Onboarded(),
+		"id":             u.ID.String(),
+		"org_id":         nil, // null = pre-onboarding (set below when present)
+		"email":          u.Email,
+		"name":           u.Name,
+		"role":           u.Role,
+		"avatar_url":     u.AvatarURL,
+		"auth_provider":  u.AuthProvider,
+		"email_verified": u.EmailVerified,
+		"onboarded":      u.Onboarded(),
 	}
 	if u.Onboarded() {
 		r["org_id"] = u.OrgID.String()

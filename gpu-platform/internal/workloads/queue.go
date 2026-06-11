@@ -13,24 +13,24 @@ const avgWaitFallback = 15 * time.Minute
 
 // QueueEntry is one waiting workload (F3).
 type QueueEntry struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	Position      int       `json:"position"`
-	GPUType       string    `json:"gpu_type"`
-	GPUCount      int       `json:"gpu_count"`
-	QueuedAt      time.Time `json:"queued_at"`
-	EstWaitMin    int       `json:"est_wait_min"`
-	EstStart      time.Time `json:"est_start"`
-	OwnerEmail    string    `json:"owner_email,omitempty"`
-	ProjectName   string    `json:"project_name,omitempty"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Position    int       `json:"position"`
+	GPUType     string    `json:"gpu_type"`
+	GPUCount    int       `json:"gpu_count"`
+	QueuedAt    time.Time `json:"queued_at"`
+	EstWaitMin  int       `json:"est_wait_min"`
+	EstStart    time.Time `json:"est_start"`
+	OwnerEmail  string    `json:"owner_email,omitempty"`
+	ProjectName string    `json:"project_name,omitempty"`
 }
 
 // QueueStats powers the admin queue dashboard.
 type QueueStats struct {
-	Waiting       int        `json:"waiting"`
-	AvgWaitMin    int        `json:"avg_wait_min"`
-	NextFreeAt    *time.Time `json:"next_free_at,omitempty"`
-	Entries       []QueueEntry `json:"entries"`
+	Waiting    int          `json:"waiting"`
+	AvgWaitMin int          `json:"avg_wait_min"`
+	NextFreeAt *time.Time   `json:"next_free_at,omitempty"`
+	Entries    []QueueEntry `json:"entries"`
 }
 
 // estWaitPerPosition estimates how long one queue slot takes to clear, from the
@@ -102,6 +102,7 @@ func (s *ServiceImpl) CancelQueued(ctx context.Context, id uuid.UUID) error {
 	var orgID uuid.UUID
 	_ = s.db.QueryRow(ctx, `SELECT org_id FROM workloads WHERE id=$1`, id).Scan(&orgID)
 	_ = s.recordEvent(ctx, id, orgID, "stopped", "cancelled from queue")
+	s.notify(orgID, "workloads", "queue")
 	return nil
 }
 
@@ -214,6 +215,7 @@ func (s *ServiceImpl) promoteOne(ctx context.Context, orgID, id uuid.UUID, gpuTy
 	}
 	_ = s.recordEvent(ctx, id, orgID, "node_selected", "promoted from queue")
 	_ = s.recordEvent(ctx, id, orgID, "preparing", "")
+	s.notify(orgID, "workloads", "queue")
 	s.dispatch.Nudge(placed.nodeID)
 	return true, nil
 }

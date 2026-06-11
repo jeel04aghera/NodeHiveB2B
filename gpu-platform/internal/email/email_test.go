@@ -45,3 +45,30 @@ func TestNewSenderSelectsProvider(t *testing.T) {
 		t.Errorf("console send: %v", err)
 	}
 }
+
+func TestBuildVerifyAndResetEmails(t *testing.T) {
+	cases := []struct {
+		name    string
+		msg     Message
+		url     string
+		subject string
+	}{
+		{"verify", BuildVerifyEmail("u@x.com", "https://app/verify-email?token=v1"), "https://app/verify-email?token=v1", "Verify"},
+		{"reset", BuildPasswordResetEmail("u@x.com", "https://app/reset-password?token=r1"), "https://app/reset-password?token=r1", "Reset"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.msg.To != "u@x.com" {
+				t.Errorf("to = %q", c.msg.To)
+			}
+			if !strings.Contains(c.msg.Subject, c.subject) {
+				t.Errorf("subject %q missing %q", c.msg.Subject, c.subject)
+			}
+			for _, body := range []string{c.msg.Text, c.msg.HTML} {
+				if !strings.Contains(body, c.url) {
+					t.Errorf("body missing link %q:\n%s", c.url, body)
+				}
+			}
+		})
+	}
+}

@@ -92,6 +92,7 @@ type ServiceImpl struct {
 	dispatch Dispatcher
 	billing  Biller
 	auditRec func(ctx context.Context, e domain.AuditLog) // optional, fire-and-forget
+	publish  func(orgID uuid.UUID, topics ...string)      // optional realtime hints (Phase 6)
 }
 
 // Option configures optional service features without breaking existing callers.
@@ -102,6 +103,19 @@ type Option func(*ServiceImpl)
 // launch/stop are audited at the HTTP layer where the actor is known.
 func WithAudit(rec func(ctx context.Context, e domain.AuditLog)) Option {
 	return func(s *ServiceImpl) { s.auditRec = rec }
+}
+
+// WithEvents publishes realtime cache-invalidation hints (SSE, Phase 6) on
+// workload/queue state transitions.
+func WithEvents(pub func(orgID uuid.UUID, topics ...string)) Option {
+	return func(s *ServiceImpl) { s.publish = pub }
+}
+
+// notify is the nil-safe publish helper.
+func (s *ServiceImpl) notify(orgID uuid.UUID, topics ...string) {
+	if s.publish != nil {
+		s.publish(orgID, topics...)
+	}
 }
 
 func NewService(db *pgxpool.Pool, dispatch Dispatcher, billing Biller, opts ...Option) Service {
@@ -194,6 +208,7 @@ func (s *ServiceImpl) Launch(ctx context.Context, orgID uuid.UUID, req LaunchReq
 			return domain.Workload{}, err
 		}
 		_ = s.recordEvent(ctx, id, orgID, "queued", "no matching GPU capacity — queued")
+		s.notify(orgID, "workloads", "queue")
 		return wl, nil
 	}
 	if err != nil {
@@ -218,6 +233,7 @@ func (s *ServiceImpl) Launch(ctx context.Context, orgID uuid.UUID, req LaunchReq
 	_ = s.recordEvent(ctx, id, orgID, "scheduling", "")
 	_ = s.recordEvent(ctx, id, orgID, "node_selected", "")
 	_ = s.recordEvent(ctx, id, orgID, "preparing", "")
+	s.notify(orgID, "workloads")
 	s.dispatch.Nudge(placed.nodeID)
 	return wl, nil
 }
@@ -259,6 +275,7 @@ func (s *ServiceImpl) Stop(ctx context.Context, id uuid.UUID, reason domain.Stop
 		s.auditSystem(ctx, orgID, "system", "workload.stop", id,
 			map[string]any{"reason": string(reason)})
 	}
+	s.notify(orgID, "workloads")
 	if nodeID != nil {
 		s.dispatch.Nudge(*nodeID)
 	}
@@ -386,16 +403,21 @@ func (s *ServiceImpl) SweepStuck(ctx context.Context) (int, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
 	}
-	// Audit the reclaims (post-commit; the sweep result is already durable).
-	if s.auditRec != nil && len(stuck) > 0 {
+	// Audit + realtime hints for the reclaims (post-commit; already durable).
+	if (s.auditRec != nil || s.publish != nil) && len(stuck) > 0 {
 		rows, err := s.db.Query(ctx,
 			`SELECT id, org_id FROM workloads WHERE id = ANY($1)`, stuck)
 		if err == nil {
+			seen := map[uuid.UUID]bool{}
 			for rows.Next() {
 				var wid, oid uuid.UUID
 				if rows.Scan(&wid, &oid) == nil {
 					s.auditSystem(ctx, oid, "system", "workload.failed", wid,
 						map[string]any{"reason": "sweep_reclaim"})
+					if !seen[oid] {
+						seen[oid] = true
+						s.notify(oid, "workloads", "queue")
+					}
 				}
 			}
 			rows.Close()
@@ -538,6 +560,17 @@ func (s *ServiceImpl) List(ctx context.Context, orgID uuid.UUID, f ListFilter) (
 		args = append(args, *f.ProjectID)
 		q += fmt.Sprintf(" AND project_id=$%d", len(args))
 	}
+	// Project-level isolation (Phase 6): hide workloads living in restricted
+	// projects the viewer doesn't belong to. The launcher always sees their own.
+	if f.Viewer != nil && !f.ViewerIsAdmin {
+		args = append(args, *f.Viewer)
+		q += fmt.Sprintf(` AND (user_id=$%[1]d
+		     OR project_id IS NULL
+		     OR NOT EXISTS (SELECT 1 FROM projects p
+		                     WHERE p.id = workloads.project_id AND p.visibility='restricted')
+		     OR EXISTS (SELECT 1 FROM project_members m
+		                 WHERE m.project_id = workloads.project_id AND m.user_id=$%[1]d))`, len(args))
+	}
 	q += " ORDER BY created_at DESC LIMIT 200"
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
@@ -617,6 +650,7 @@ func (s *ServiceImpl) UpdateStatus(ctx context.Context, nodeID, id uuid.UUID, st
 			_ = s.recordEvent(ctx, id, orgID, "jupyter_enabled", jupyter)
 		}
 		_ = s.recordEvent(ctx, id, orgID, "ready", "workload running")
+		s.notify(orgID, "workloads")
 		return nil
 
 	case domain.WorkloadStopped, domain.WorkloadFailed:
@@ -672,6 +706,9 @@ func (s *ServiceImpl) UpdateStatus(ctx context.Context, nodeID, id uuid.UUID, st
 		}
 		_ = s.recordEvent(ctx, id, orgID, stageName, "")
 		s.auditSystem(ctx, orgID, "agent", "workload."+stageName, id, nil)
+		// Terminal transition: workload list, queue (a freed GPU may promote) and
+		// budgets (final metering settles spend) all change.
+		s.notify(orgID, "workloads", "queue", "budgets")
 		// Low-latency promotion nudge; the periodic queue sweep is the reliable
 		// fallback if this goroutine is lost to a restart.
 		go func() { _, _ = s.PromoteQueued(context.Background(), orgID) }()

@@ -1,5 +1,5 @@
 "use client";
-import { Suspense, useEffect } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -10,6 +10,8 @@ import {
 import { useAuth, roleLabel } from "@/lib/auth";
 import { useDeploymentConfig, useAlerts } from "@/lib/queries";
 import { useOrgProfile } from "@/lib/org";
+import { RealtimeUpdates } from "@/lib/realtime";
+import { api } from "@/lib/api-client";
 import { cn } from "@/components/ui";
 export const dynamic = 'force-dynamic';
 
@@ -68,6 +70,33 @@ function currentLabel(pathname: string, tab: string | null): string {
   for (const g of NAV) for (const it of g.items) if (itemActive(it, pathname, tab)) return it.label;
   if (pathname.startsWith("/settings")) return "Settings";
   return "NodeHive";
+}
+
+// VerifyEmailBanner nudges unverified accounts (Phase 6). Resend is one click;
+// the dev console (or the inbox) carries the link.
+function VerifyEmailBanner() {
+  const [state, setState] = useState<"idle" | "sending" | "sent">("idle");
+  const resend = async () => {
+    setState("sending");
+    try {
+      await api("/auth/verify-email/request", { method: "POST" });
+      setState("sent");
+    } catch {
+      setState("idle");
+    }
+  };
+  return (
+    <div className="flex items-center justify-between gap-3 border-b border-amber-500/20 bg-amber-500/10 px-8 py-2 text-xs text-amber-300">
+      <span>Please verify your email address — check your inbox for the confirmation link.</span>
+      <button
+        onClick={resend}
+        disabled={state !== "idle"}
+        className="shrink-0 font-medium underline-offset-2 hover:underline disabled:opacity-60"
+      >
+        {state === "sent" ? "Sent ✓" : state === "sending" ? "Sending…" : "Resend verification"}
+      </button>
+    </div>
+  );
 }
 
 function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
@@ -183,6 +212,8 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
+        {user.email_verified === false && <VerifyEmailBanner />}
+
         <main className="flex-1 px-8 py-7">
           <div className="mx-auto max-w-[1440px]">{children}</div>
         </main>
@@ -194,6 +225,7 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
     <Suspense fallback={<div className="min-h-screen bg-canvas" />}>
+      <RealtimeUpdates />
       <DashboardLayoutInner>{children}</DashboardLayoutInner>
     </Suspense>
   );

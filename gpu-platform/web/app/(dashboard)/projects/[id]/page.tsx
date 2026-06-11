@@ -2,14 +2,18 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useProjects, useWorkloads, useChargeback } from "@/lib/queries";
+import {
+  useProjects, useWorkloads, useChargeback,
+  useProjectDetailSettings, useUpdateProject, useAddProjectMember, useRemoveProjectMember, useUsers,
+} from "@/lib/queries";
+import { useAuth, isAdminRole } from "@/lib/auth";
 import { useEnrichedWorkloads } from "@/lib/enrich";
 import { formatMoney } from "@/lib/currency";
 import {
-  Card, StatCard, Table, Row, Cell, Badge, Button, EmptyState, Tabs, Meter,
-  toneFor, WORKLOAD_TONE,
+  Card, CardHeader, StatCard, Table, Row, Cell, Badge, Button, EmptyState, Tabs, Meter,
+  Select, FormField, toneFor, WORKLOAD_TONE,
 } from "@/components/ui";
-import { ArrowLeft, Layers, Play, User } from "lucide-react";
+import { ArrowLeft, Layers, Play, User, Lock } from "lucide-react";
 
 function ago(iso?: string) {
   if (!iso) return "—";
@@ -22,6 +26,8 @@ function ago(iso?: string) {
 
 export default function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
+  const isAdmin = isAdminRole(user?.role);
   const { data: projects } = useProjects();
   const { data: workloads } = useWorkloads();
   const enriched = useEnrichedWorkloads((workloads ?? []).map((w) => w.id));
@@ -59,6 +65,10 @@ export default function ProjectDetailPage() {
       <div className="flex items-center justify-between">
         <h1 className="inline-flex items-center gap-2.5 text-xl font-semibold tracking-tight text-ink">
           <Layers size={20} className="text-ink-subtle" />{project?.name ?? "Project"}
+          {project?.visibility === "restricted" && (
+            <Badge tone="amber"><Lock size={11} /> Restricted</Badge>
+          )}
+          {project?.archived_at && <Badge tone="neutral">Archived</Badge>}
         </h1>
         <Link href={launchHref}><Button variant="primary" size="md"><Play size={14} /> New workload</Button></Link>
       </div>
@@ -70,7 +80,16 @@ export default function ProjectDetailPage() {
         <StatCard label="Members" value={members.length} hint="contributing owners" />
       </div>
 
-      <Tabs items={[{ key: "workloads", label: "Workloads", count: wls.length }, { key: "members", label: "Members", count: members.length }, { key: "activity", label: "Activity" }]} value={tab} onChange={setTab} />
+      <Tabs
+        items={[
+          { key: "workloads", label: "Workloads", count: wls.length },
+          { key: "members", label: "Members", count: members.length },
+          { key: "activity", label: "Activity" },
+          ...(isAdmin ? [{ key: "access", label: "Access" }] : []),
+        ]}
+        value={tab}
+        onChange={setTab}
+      />
 
       {tab === "workloads" && (
         <Card className="overflow-hidden">
@@ -114,6 +133,8 @@ export default function ProjectDetailPage() {
         </Card>
       )}
 
+      {tab === "access" && isAdmin && <ProjectAccess id={id} />}
+
       {tab === "activity" && (
         <Card>
           {!wls.length ? (
@@ -134,6 +155,86 @@ export default function ProjectDetailPage() {
           )}
         </Card>
       )}
+    </div>
+  );
+}
+
+// ProjectAccess (Phase 6, admin-only): visibility, archive and the explicit member
+// list that gates a restricted project.
+function ProjectAccess({ id }: { id: string }) {
+  const { data: detail } = useProjectDetailSettings(id);
+  const { data: users } = useUsers();
+  const update = useUpdateProject();
+  const addMember = useAddProjectMember();
+  const removeMember = useRemoveProjectMember();
+  const [pick, setPick] = useState("");
+
+  const memberIds = new Set((detail?.members ?? []).map((m) => m.user_id));
+  const candidates = (users ?? []).filter((u) => !memberIds.has(u.id));
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader
+          title="Access control"
+          description="Restricted projects are only visible and usable by the members below (plus org admins). Open projects admit every org member."
+        />
+        <div className="flex flex-wrap items-end gap-4 px-5 pb-5">
+          <FormField label="Visibility">
+            <Select
+              value={detail?.visibility ?? "open"}
+              onChange={(e) => update.mutate({ id, visibility: e.target.value })}
+              className="w-56"
+            >
+              <option value="open">Open — all org members</option>
+              <option value="restricted">Restricted — members only</option>
+            </Select>
+          </FormField>
+          <Button
+            size="sm"
+            variant={detail?.archived_at ? "secondary" : "danger"}
+            onClick={() => update.mutate({ id, archived: !detail?.archived_at })}
+          >
+            {detail?.archived_at ? "Restore project" : "Archive project"}
+          </Button>
+          {detail?.archived_at && (
+            <span className="pb-2 text-xs text-ink-subtle">Archived projects refuse new launches; running workloads continue.</span>
+          )}
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader title="Project members" description="Who can use this project when it is restricted." />
+        <div className="flex items-end gap-3 px-5 pb-4">
+          <FormField label="Add member">
+            <Select value={pick} onChange={(e) => setPick(e.target.value)} className="w-64">
+              <option value="">Select a user…</option>
+              {candidates.map((u) => (
+                <option key={u.id} value={u.id}>{u.name ? `${u.name} <${u.email}>` : u.email}</option>
+              ))}
+            </Select>
+          </FormField>
+          <Button size="sm" disabled={!pick || addMember.isPending}
+            onClick={async () => { await addMember.mutateAsync({ id, user_id: pick }); setPick(""); }}>
+            Add
+          </Button>
+        </div>
+        {!detail?.members?.length ? (
+          <div className="px-5 pb-6 text-sm text-ink-muted">No explicit members. If the project is restricted, only org admins can use it.</div>
+        ) : (
+          <Table columns={[{ key: "m", label: "Member" }, { key: "since", label: "Added" }, { key: "x", label: "" }]}>
+            {detail.members.map((m) => (
+              <Row key={m.user_id}>
+                <Cell className="font-medium text-ink">{m.name || m.email}<span className="ml-2 text-xs text-ink-subtle">{m.email}</span></Cell>
+                <Cell className="text-xs text-ink-subtle">{new Date(m.created_at).toLocaleDateString()}</Cell>
+                <Cell>
+                  <Button size="sm" variant="ghost" onClick={() => removeMember.mutate({ id, user_id: m.user_id })}>Remove</Button>
+                </Cell>
+              </Row>
+            ))}
+          </Table>
+        )}
+      </Card>
     </div>
   );
 }

@@ -532,7 +532,17 @@ export function useDepartments() {
   return useQuery({ queryKey: ["departments"], queryFn: () => api<Department[]>("/departments") });
 }
 
-export interface Project { id: string; name: string }
+export interface Project {
+  id: string;
+  name: string;
+  // Phase 6 — project isolation
+  description?: string;
+  visibility?: "open" | "restricted";
+  archived_at?: string | null;
+  member_count?: number;
+  member?: boolean;
+  created_at?: string;
+}
 
 export function useProjects() {
   return useQuery({ queryKey: ["projects"], queryFn: () => api<Project[]>("/projects") });
@@ -843,5 +853,121 @@ export function useDeleteAlertRule() {
   return useMutation({
     mutationFn: (id: string) => api<void>(`/alert-rules/${id}`, { method: "DELETE" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["alert-rules"] }),
+  });
+}
+
+// ── Phase 6: API keys, service accounts, project isolation, email flows ───────
+
+export interface APIKey {
+  id: string;
+  name: string;
+  prefix: string;
+  user_id?: string;
+  service_account_id?: string;
+  created_at: string;
+  expires_at?: string;
+  last_used_at?: string;
+  revoked_at?: string;
+  status: "active" | "expired" | "revoked";
+}
+
+export function useAPIKeys() {
+  return useQuery({ queryKey: ["api-keys"], queryFn: () => api<APIKey[]>("/api-keys") });
+}
+
+export function useCreateAPIKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { name: string; ttl_days?: number; service_account_id?: string }) =>
+      api<{ key: string; api_key: APIKey }>("/api-keys", { method: "POST", body: JSON.stringify(body) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["api-keys"] }),
+  });
+}
+
+export function useRevokeAPIKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<void>(`/api-keys/${id}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["api-keys"] }),
+  });
+}
+
+export interface ServiceAccount {
+  id: string;
+  name: string;
+  description: string;
+  role: "admin" | "member";
+  created_at: string;
+  disabled_at?: string | null;
+}
+
+export function useServiceAccounts() {
+  return useQuery({ queryKey: ["service-accounts"], queryFn: () => api<ServiceAccount[]>("/service-accounts") });
+}
+
+export function useCreateServiceAccount() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { name: string; description?: string; role: string }) =>
+      api<ServiceAccount>("/service-accounts", { method: "POST", body: JSON.stringify(body) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["service-accounts"] }),
+  });
+}
+
+export function useUpdateServiceAccount() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, disabled }: { id: string; disabled: boolean }) =>
+      api<void>(`/service-accounts/${id}`, { method: "PATCH", body: JSON.stringify({ disabled }) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["service-accounts"] });
+      qc.invalidateQueries({ queryKey: ["api-keys"] });
+    },
+  });
+}
+
+export interface ProjectMember {
+  project_id: string;
+  user_id: string;
+  email: string;
+  name: string;
+  created_at: string;
+}
+
+export function useProjectDetailSettings(id: string) {
+  return useQuery({
+    queryKey: ["projects", id, "settings"],
+    queryFn: () => api<Project & { members: ProjectMember[] }>(`/projects/${id}`),
+    enabled: !!id,
+  });
+}
+
+export function useUpdateProject() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: string; name?: string; description?: string; visibility?: string; archived?: boolean }) =>
+      api<Project>(`/projects/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    onSuccess: (_d, v) => {
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      qc.invalidateQueries({ queryKey: ["projects", v.id, "settings"] });
+    },
+  });
+}
+
+export function useAddProjectMember() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, user_id }: { id: string; user_id: string }) =>
+      api<void>(`/projects/${id}/members`, { method: "POST", body: JSON.stringify({ user_id }) }),
+    onSuccess: (_d, v) => qc.invalidateQueries({ queryKey: ["projects", v.id, "settings"] }),
+  });
+}
+
+export function useRemoveProjectMember() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, user_id }: { id: string; user_id: string }) =>
+      api<void>(`/projects/${id}/members/${user_id}`, { method: "DELETE" }),
+    onSuccess: (_d, v) => qc.invalidateQueries({ queryKey: ["projects", v.id, "settings"] }),
   });
 }
