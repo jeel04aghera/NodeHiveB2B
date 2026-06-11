@@ -18,6 +18,27 @@
   --c-ink-subtle: 113 113 122;
   --c-accent: 16 185 129;
   --c-accent-soft: 52 211 153;
+
+  /* ── UI-overhaul tokens (Phase 1, additive — nothing below is consumed by the
+     dashboard until Phase 4). Brand gradient: violet → indigo → cyan. ── */
+  --grad-a: 139 92 246;  /* violet-500 */
+  --grad-b: 99 102 241;  /* indigo-500 */
+  --grad-c: 34 211 238;  /* cyan-400  */
+  --gradient-brand: linear-gradient(135deg, rgb(var(--grad-a)) 0%, rgb(var(--grad-b)) 45%, rgb(var(--grad-c)) 100%);
+
+  /* Frosted-glass recipe (single source of truth — use the .glass classes, never
+     hand-rolled blur values). Alphas tuned for AA text contrast on --c-canvas. */
+  --glass-bg-alpha: 0.05;
+  --glass-border-alpha: 0.09;
+  --glass-blur: 16px;
+
+  /* Motion tokens (mirrored in lib/motion.ts for GSAP). */
+  --ease-expressive: cubic-bezier(0.22, 1, 0.36, 1); /* big entrances, hero moves   */
+  --ease-snappy: cubic-bezier(0.5, 0, 0.15, 1);      /* micro-interactions, toggles */
+  --dur-fast: 150ms;
+  --dur-base: 240ms;
+  --dur-slow: 420ms;
+  --dur-hero: 800ms;
 }
 
 /* Light scope — opted into by the public marketing pages so they stay light while
@@ -33,6 +54,63 @@
   --c-ink-subtle: 163 163 163;
   --c-accent: 5 150 105;
   --c-accent-soft: 16 185 129;
+}
+
+@layer components {
+  /* ── Glass primitives (Phase 1). One recipe, reused everywhere glass appears.
+     Rules: glass is page chrome (nav, cards, panels) — never table rows or long
+     scroll containers (backdrop-filter cost). Text on glass: ink/ink-muted only
+     (ink-subtle fails AA on translucent fills). ── */
+  .glass {
+    background: rgb(255 255 255 / var(--glass-bg-alpha));
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+    backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+    border: 1px solid rgb(255 255 255 / var(--glass-border-alpha));
+    box-shadow: inset 0 1px 0 0 rgb(255 255 255 / 0.06); /* top inner highlight */
+  }
+  .glass-strong {
+    --glass-bg-alpha: 0.09;
+    --glass-border-alpha: 0.14;
+    --glass-blur: 24px;
+  }
+
+  /* Brand-gradient text. Pair with font-display; keep to one phrase per viewport. */
+  .text-gradient {
+    background-image: var(--gradient-brand);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* 1px gradient border (cards that need the brand edge): two-layer background —
+     opaque surface in the padding box, gradient in the border box. */
+  .gradient-border {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(rgb(var(--c-surface)), rgb(var(--c-surface))) padding-box,
+      var(--gradient-brand) border-box;
+  }
+
+  /* Ambient gradient mesh for dark sections — pure CSS, no image payload. */
+  .bg-mesh {
+    background-color: rgb(var(--c-canvas));
+    background-image:
+      radial-gradient(40rem 28rem at 18% -8%, rgb(var(--grad-a) / 0.16), transparent 60%),
+      radial-gradient(36rem 26rem at 85% 4%, rgb(var(--grad-c) / 0.1), transparent 60%),
+      radial-gradient(30rem 22rem at 55% 110%, rgb(var(--grad-b) / 0.12), transparent 65%);
+  }
+}
+
+/* Motion policy: marketing entrance/scroll animations are driven by lib/motion.ts,
+   which no-ops under reduced motion. This kills any CSS-keyframe stragglers tagged
+   with the marketing animation classes (hover/focus transitions stay — they're
+   user-initiated and ≤ --dur-base). */
+@media (prefers-reduced-motion: reduce) {
+  .anim-reveal,
+  .anim-reveal * {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 * {

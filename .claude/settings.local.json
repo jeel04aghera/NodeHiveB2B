@@ -230,7 +230,14 @@
       "Bash(python3 -c 'import sys,json; d=json.load\\(sys.stdin\\); print\\(\"me: verified =\", d.get\\(\"email_verified\"\\)\\)')",
       "Bash(awk *)",
       "Bash(pkill -f \"Chrome --headless\")",
-      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --disable-gpu --window-size=1440,900 --virtual-time-budget=10000 --timeout=20000 --screenshot=/tmp/p6_api_tab2.png http://localhost:3000/__shot.html)"
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --disable-gpu --window-size=1440,900 --virtual-time-budget=10000 --timeout=20000 --screenshot=/tmp/p6_api_tab2.png http://localhost:3000/__shot.html)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --disable-gpu --window-size=1440,2400 --timeout=12000 --screenshot=/tmp/before_landing.png http://localhost:3100/)",
+      "Bash(pkill -f \"next start\")",
+      "Bash(node *)",
+      "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --disable-gpu --window-size=1440,2900 --timeout=12000 --screenshot=/tmp/p1_preview_desktop.png http://localhost:3100/style-preview)",
+      "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --disable-gpu --window-size=390,3200 --timeout=12000 --screenshot=/tmp/p1_preview_mobile.png http://localhost:3100/style-preview)",
+      "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --disable-gpu --window-size=1440,2400 --timeout=12000 --screenshot=/tmp/p1_landing_after.png http://localhost:3100/)",
+      "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --disable-gpu --window-size=1440,900 --timeout=12000 --screenshot=/tmp/p1_reset_after.png http://localhost:3100/reset-password)"
     ]
   }
 }

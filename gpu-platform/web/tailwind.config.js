@@ -17,11 +17,38 @@ module.exports = {
         "ink-subtle": "rgb(var(--c-ink-subtle) / <alpha-value>)",
         accent: "rgb(var(--c-accent) / <alpha-value>)",
         "accent-soft": "rgb(var(--c-accent-soft) / <alpha-value>)",
+        // UI-overhaul brand hues (Phase 1, additive). Use for tints/glows; the full
+        // gradient is `bg-gradient-brand` / `.text-gradient`.
+        "brand-violet": "rgb(var(--grad-a) / <alpha-value>)",
+        "brand-indigo": "rgb(var(--grad-b) / <alpha-value>)",
+        "brand-cyan": "rgb(var(--grad-c) / <alpha-value>)",
+      },
+      backgroundImage: {
+        "gradient-brand": "var(--gradient-brand)",
+      },
+      fontFamily: {
+        // Opt-in faces (CSS variables set in app/layout.tsx). `font-sans` default is
+        // deliberately untouched until Phase 4 so the dashboard doesn't re-font.
+        display: ["var(--font-display)", "ui-sans-serif", "system-ui", "sans-serif"],
+        body: ["var(--font-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
+      },
+      fontSize: {
+        // Fluid display scale for marketing headings (clamp = no breakpoint jumps).
+        "display-xl": ["clamp(2.75rem, 1.4rem + 5vw, 4.5rem)", { lineHeight: "1.04", letterSpacing: "-0.03em", fontWeight: "600" }],
+        "display-lg": ["clamp(2.1rem, 1.3rem + 3vw, 3.25rem)", { lineHeight: "1.08", letterSpacing: "-0.025em", fontWeight: "600" }],
+        "display-md": ["clamp(1.6rem, 1.25rem + 1.5vw, 2.25rem)", { lineHeight: "1.15", letterSpacing: "-0.02em", fontWeight: "600" }],
       },
       boxShadow: {
         card: "0 1px 2px 0 rgb(0 0 0 / 0.35)",
         pop: "0 8px 28px -6px rgb(0 0 0 / 0.55), 0 2px 8px -2px rgb(0 0 0 / 0.4)",
         glow: "0 0 0 1px rgb(16 185 129 / 0.15), 0 0 24px -6px rgb(16 185 129 / 0.25)",
+        // Brand-gradient glow for primary CTAs / highlighted glass cards.
+        "glow-brand": "0 0 0 1px rgb(var(--grad-b) / 0.35), 0 10px 38px -10px rgb(var(--grad-b) / 0.55)",
+        "glow-brand-lg": "0 0 0 1px rgb(var(--grad-b) / 0.45), 0 16px 56px -12px rgb(var(--grad-b) / 0.7), 0 0 24px -4px rgb(var(--grad-c) / 0.35)",
+      },
+      transitionTimingFunction: {
+        expressive: "var(--ease-expressive)",
+        snappy: "var(--ease-snappy)",
       },
       keyframes: {
         "nh-pulse": {
