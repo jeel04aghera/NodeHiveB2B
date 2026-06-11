@@ -9,9 +9,9 @@ const COLUMNS: { heading: string; links: { label: string; href: string }[] }[] =
     heading: "Product",
     links: [
       { label: "How it works", href: "/#how-it-works" },
-      { label: "Plans", href: "/#plans" },
       { label: "Use cases", href: "/#use-cases" },
       { label: "Security", href: "/#security" },
+      { label: "FAQ", href: "/#faq" },
     ],
   },
   {

@@ -91,6 +91,16 @@
       var(--gradient-brand) border-box;
   }
 
+  /* Hairline infrastructure grid (Phase 2) — pure-CSS overlay for sections that
+     want a faint "fabric" texture behind glass cards. Pair with a mask so it
+     fades out instead of ending abruptly. */
+  .bg-grid {
+    background-image:
+      linear-gradient(rgb(255 255 255 / 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(255 255 255 / 0.035) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+
   /* Ambient gradient mesh for dark sections — pure CSS, no image payload. */
   .bg-mesh {
     background-color: rgb(var(--c-canvas));
@@ -110,6 +120,14 @@
   .anim-reveal * {
     animation: none !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* Smooth in-page anchor scrolling (marketing nav → sections); instant jumps
+   under reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
   }
 }
 

@@ -237,7 +237,29 @@
       "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --disable-gpu --window-size=1440,2900 --timeout=12000 --screenshot=/tmp/p1_preview_desktop.png http://localhost:3100/style-preview)",
       "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --disable-gpu --window-size=390,3200 --timeout=12000 --screenshot=/tmp/p1_preview_mobile.png http://localhost:3100/style-preview)",
       "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --disable-gpu --window-size=1440,2400 --timeout=12000 --screenshot=/tmp/p1_landing_after.png http://localhost:3100/)",
-      "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --disable-gpu --window-size=1440,900 --timeout=12000 --screenshot=/tmp/p1_reset_after.png http://localhost:3100/reset-password)"
+      "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --disable-gpu --window-size=1440,900 --timeout=12000 --screenshot=/tmp/p1_reset_after.png http://localhost:3100/reset-password)",
+      "Bash(sips -c 520 1440 --cropOffset 640 0 /tmp/ev_full.png --out /tmp/ev_typography.png)",
+      "Bash(sips -c 540 1440 --cropOffset 1540 0 /tmp/ev_full.png --out /tmp/ev_glass.png)",
+      "Bash(sips -c 320 1440 --cropOffset 2020 0 /tmp/ev_full.png --out /tmp/ev_buttons.png)",
+      "Bash(sips -c 380 1440 --cropOffset 2520 0 /tmp/ev_full.png --out /tmp/ev_footer.png)",
+      "Bash(sips -c 380 1440 --cropOffset 2510 0 /tmp/ev_full.png --out /tmp/ev_footer.png)",
+      "Bash(sips -c 220 1440 --cropOffset 1700 0 /tmp/ev_full.png --out /tmp/ev_buttons2.png)",
+      "Bash(sips -c 170 1440 --cropOffset 1920 0 /tmp/ev_full.png --out /tmp/ev_buttons3.png)",
+      "Bash(sips -c 350 1440 --cropOffset 2300 0 /tmp/ev_full.png --out /tmp/ev_footer2.png)",
+      "Bash(pkill -f next-server)",
+      "Bash(git -C /Users/jeelaghera/Downloads/Koala branch)",
+      "Bash(git -C /Users/jeelaghera/Downloads/Koala log --oneline -3 ui-overhaul)",
+      "Bash(git -C /Users/jeelaghera/Downloads/Koala rev-parse main ui-overhaul)",
+      "Bash(git *)",
+      "Bash(npm install *)",
+      "Bash(npm ls *)",
+      "Bash(grep -o '\"[a-z-]\\\\{4,30\\\\}\"' 114-f7336320272d9741.js)",
+      "Bash(npx next *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3100/)",
+      "Bash(mkdir -p /tmp/nh-phase2)",
+      "Bash(npx -y lighthouse http://localhost:3100/ --preset=desktop --quiet --chrome-flags=\"--headless=new\" --output=json --output-path=/tmp/nh-phase2/lh-desktop.json --only-categories=performance,accessibility,best-practices,seo)",
+      "Bash(curl *)",
+      "Bash(npx -y lighthouse http://localhost:3100/ --preset=desktop --quiet --chrome-flags=\"--headless=new\" --output=json --output-path=/tmp/nh-phase2-lh-desktop.json --only-categories=performance,accessibility,best-practices,seo)"
     ]
   }
 }

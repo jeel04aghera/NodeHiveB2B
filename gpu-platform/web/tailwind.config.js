@@ -59,10 +59,22 @@ module.exports = {
           from: { opacity: "0", transform: "translateY(6px)" },
           to: { opacity: "1", transform: "translateY(0)" },
         },
+        // Phase 2 (marketing): canvas fade-in over the static fallback, and a
+        // slow ambient drift for decorative glow accents (motion-safe: only).
+        "nh-fade-in-slow": {
+          from: { opacity: "0" },
+          to: { opacity: "1" },
+        },
+        "nh-float": {
+          "0%, 100%": { transform: "translateY(0)" },
+          "50%": { transform: "translateY(-10px)" },
+        },
       },
       animation: {
         "nh-pulse": "nh-pulse 2s ease-in-out infinite",
         "nh-fade-up": "nh-fade-up 240ms ease-out",
+        "nh-fade-in-slow": "nh-fade-in-slow 1.2s cubic-bezier(0.22, 1, 0.36, 1) both",
+        "nh-float": "nh-float 9s ease-in-out infinite",
       },
     },
   },
