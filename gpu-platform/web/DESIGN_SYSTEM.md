@@ -87,6 +87,41 @@ checks `prefersReducedMotion()` and falls back to instantly-visible content; the
 glass cards. Radii: `rounded-md` controls, `rounded-xl` cards, `rounded-2xl`
 hero/section frames.
 
+## Phase 2 additions (marketing landing)
+
+New utilities/keyframes — all additive, marketing-only:
+
+- `.bg-grid` — hairline infrastructure grid overlay (pure CSS). Pair with a
+  `mask-image` so it fades instead of ending at a hard edge.
+- `animate-nh-fade-in-slow` — 1.2s fade for the 3D canvas appearing over its
+  static fallback.
+- `animate-nh-float` — 9s ambient drift for decorative glow accents. Always
+  behind the `motion-safe:` variant.
+- Smooth in-page anchor scrolling is enabled globally, gated to
+  `prefers-reduced-motion: no-preference`.
+
+**GSAP orchestration** lives in `components/marketing/useGsap.ts` — the only
+module that imports `gsap` (dynamically). Sections render final-state markup
+and animate with `fromTo`, so no-JS and reduced-motion visitors see finished
+content instantly. Everything runs in a `gsap.context` scoped to the section
+root and reverts on unmount.
+
+**3D hero** (`components/marketing/Hero3D.tsx` → dynamic
+`hero3d/LatticeScene.tsx`): R3F/three/drei load only after the hero is in
+viewport AND WebGL + motion are available AND the device isn't low-power.
+`HeroFallback.tsx` (pure CSS) is the permanent visual otherwise. DPR ≤ 2,
+half detail on mobile, `frameloop="never"` when off-screen/tab-hidden. The
+lattice palette mirrors `--grad-a/b/c`; keep them in sync.
+
+**Gradient rationing on the landing page:** the hero and the final CTA are the
+only viewport regions with a gradient CTA + gradient text phrase. Section
+kickers use solid `text-brand-cyan`.
+
+**Content honesty:** no invented customers, logos, or metrics. The metrics
+section is visibly badged "illustrative" until real data replaces it
+(`TODO(real-data)`); testimonials render nothing until real quotes exist
+(`TODO(testimonials)`).
+
 ## Component API guarantee
 
 `components/ui/*` public APIs are frozen through the overhaul. Phase 1 added only
