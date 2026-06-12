@@ -28,12 +28,19 @@ let bundle: Promise<GsapBundle> | null = null;
 /** Singleton lazy loader — one network fetch + one plugin registration per page. */
 export function loadGsap(): Promise<GsapBundle> {
   if (!bundle) {
-    bundle = Promise.all([import("gsap"), import("gsap/ScrollTrigger")]).then(
-      ([g, st]) => {
-        g.gsap.registerPlugin(st.ScrollTrigger);
-        return { gsap: g.gsap, ScrollTrigger: st.ScrollTrigger };
-      },
-    );
+    bundle = Promise.all([
+      import("gsap"),
+      import("gsap/ScrollTrigger"),
+      import("gsap/CustomEase"),
+    ]).then(([g, st, ce]) => {
+      g.gsap.registerPlugin(st.ScrollTrigger, ce.CustomEase);
+      // Hand-tuned house curves (EASE in lib/motion.ts) — exact parity with the
+      // CSS --ease-* variables instead of nearest power-curve approximations.
+      ce.CustomEase.create("nh-expressive", "0.22, 1, 0.36, 1");
+      ce.CustomEase.create("nh-snappy", "0.5, 0, 0.15, 1");
+      ce.CustomEase.create("nh-hero", "0.16, 1, 0.3, 1");
+      return { gsap: g.gsap, ScrollTrigger: st.ScrollTrigger };
+    });
   }
   return bundle;
 }

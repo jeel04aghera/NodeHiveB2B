@@ -26,6 +26,10 @@
   --grad-c: 34 211 238;  /* cyan-400  */
   --gradient-brand: linear-gradient(135deg, rgb(var(--grad-a)) 0%, rgb(var(--grad-b)) 45%, rgb(var(--grad-c)) 100%);
 
+  /* Film grain for large dark fields (texture pass) — tiny inline SVG noise tile,
+     shared by .grain. Tuned to read as material, never as dirt. */
+  --grain-url: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+
   /* Frosted-glass recipe (single source of truth — use the .glass classes, never
      hand-rolled blur values). Alphas tuned for AA text contrast on --c-canvas. */
   --glass-bg-alpha: 0.05;
@@ -39,6 +43,15 @@
   --dur-base: 240ms;
   --dur-slow: 420ms;
   --dur-hero: 800ms;
+}
+
+/* Perceptually-uniform brand gradient where supported: interpolating in OKLCH
+   removes the desaturated gray dead-zone that sRGB produces between indigo and
+   cyan on large fills (CTAs, gradient borders). Same endpoints, smoother middle. */
+@supports (background: linear-gradient(in oklch, red, blue)) {
+  :root {
+    --gradient-brand: linear-gradient(135deg in oklch, rgb(var(--grad-a)) 0%, rgb(var(--grad-b)) 45%, rgb(var(--grad-c)) 100%);
+  }
 }
 
 /* Light scope — opted into by the public marketing pages so they stay light while
@@ -66,7 +79,11 @@
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
     backdrop-filter: blur(var(--glass-blur)) saturate(140%);
     border: 1px solid rgb(255 255 255 / var(--glass-border-alpha));
-    box-shadow: inset 0 1px 0 0 rgb(255 255 255 / 0.06); /* top inner highlight */
+    /* Physical surface: 1px light edge on top (catching light), faint dark seat
+       at the bottom — glass reads as a pane, not a uniform frost. */
+    box-shadow:
+      inset 0 1px 0 0 rgb(255 255 255 / 0.08),
+      inset 0 -1px 0 0 rgb(0 0 0 / 0.18);
   }
   .glass-strong {
     --glass-bg-alpha: 0.09;
@@ -96,9 +113,23 @@
      fades out instead of ending abruptly. */
   .bg-grid {
     background-image:
-      linear-gradient(rgb(255 255 255 / 0.035) 1px, transparent 1px),
-      linear-gradient(90deg, rgb(255 255 255 / 0.035) 1px, transparent 1px);
-    background-size: 44px 44px;
+      linear-gradient(rgb(255 255 255 / 0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(255 255 255 / 0.02) 1px, transparent 1px);
+    background-size: 56px 56px;
+  }
+
+  /* Film grain (Phase 2.5 texture pass) — one fixed overlay per marketing page,
+     above everything, pointer-transparent. Kills the flat-vector look of large
+     dark fields for ~0 bytes (inline SVG tile) and 0 layout cost. */
+  .grain {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    pointer-events: none;
+    background-image: var(--grain-url);
+    background-size: 160px 160px;
+    opacity: 0.05;
+    mix-blend-mode: overlay;
   }
 
   /* Ambient gradient mesh for dark sections — pure CSS, no image payload. */
@@ -121,6 +152,13 @@
     animation: none !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Considered selection: brand indigo wash, scoped to marketing surfaces
+   (the dashboard re-skins in Phase 4 — don't restyle it from here). */
+.nh-marketing ::selection {
+  background: rgb(var(--grad-b) / 0.45);
+  color: rgb(var(--c-ink));
 }
 
 /* Smooth in-page anchor scrolling (marketing nav → sections); instant jumps

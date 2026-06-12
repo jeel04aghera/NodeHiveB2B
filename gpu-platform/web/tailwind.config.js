@@ -34,9 +34,11 @@ module.exports = {
       },
       fontSize: {
         // Fluid display scale for marketing headings (clamp = no breakpoint jumps).
-        "display-xl": ["clamp(2.75rem, 1.4rem + 5vw, 4.5rem)", { lineHeight: "1.04", letterSpacing: "-0.03em", fontWeight: "600" }],
-        "display-lg": ["clamp(2.1rem, 1.3rem + 3vw, 3.25rem)", { lineHeight: "1.08", letterSpacing: "-0.025em", fontWeight: "600" }],
-        "display-md": ["clamp(1.6rem, 1.25rem + 1.5vw, 2.25rem)", { lineHeight: "1.15", letterSpacing: "-0.02em", fontWeight: "600" }],
+        // Optical tracking tightens as size grows (large display sizes need
+        // noticeably negative tracking to read "typeset" rather than "sized").
+        "display-xl": ["clamp(2.75rem, 1.4rem + 5vw, 4.5rem)", { lineHeight: "1.02", letterSpacing: "-0.042em", fontWeight: "600" }],
+        "display-lg": ["clamp(2.1rem, 1.3rem + 3vw, 3.25rem)", { lineHeight: "1.06", letterSpacing: "-0.032em", fontWeight: "600" }],
+        "display-md": ["clamp(1.6rem, 1.25rem + 1.5vw, 2.25rem)", { lineHeight: "1.12", letterSpacing: "-0.022em", fontWeight: "600" }],
       },
       boxShadow: {
         card: "0 1px 2px 0 rgb(0 0 0 / 0.35)",
