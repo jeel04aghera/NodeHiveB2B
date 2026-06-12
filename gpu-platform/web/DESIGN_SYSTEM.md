@@ -122,6 +122,40 @@ section is visibly badged "illustrative" until real data replaces it
 (`TODO(real-data)`); testimonials render nothing until real quotes exist
 (`TODO(testimonials)`).
 
+## Phase 2.5 additions (landing elevation pass)
+
+Material, texture and motion-fidelity tokens — all additive, marketing-only:
+
+- **Film grain** — `.grain` fixed overlay (one per marketing page, mounted in
+  `app/page.tsx`), tile in `--grain-url` (inline SVG `feTurbulence`, no network
+  payload). Kills the flat-vector look on large dark fields. Tuned to read as
+  material, never as dirt — don't raise its opacity.
+- **Physical glass edges** — `.glass`/`.glass-strong` now carry
+  `inset 0 1px rgb(255 255 255 / 0.08)` (top light) and
+  `inset 0 -1px rgb(0 0 0 / 0.18)` (seat shadow). Panels sit *in* the page,
+  not on it. Never hand-roll these insets per component.
+- **OKLCH gradient** — `--gradient-brand` upgrades to
+  `linear-gradient(135deg in oklch, …)` under `@supports`; sRGB fallback keeps
+  the same stops. Fixes the gray dead zone of indigo→cyan in sRGB on large fills.
+- `.gradient-border-soft` — the `.gradient-border` two-layer trick at ~50%
+  alpha, for *large* panels (FinalCta). A 1px full-brightness gradient ring
+  around a 60rem panel reads neon; soft reads as an edge catching light. Keep
+  full-brightness `.gradient-border` for small elements (plan cards).
+- **Exact-parity GSAP eases** — `useGsap.ts` registers `CustomEase` curves
+  `nh-expressive`, `nh-snappy`, `nh-hero` from the same cubic-beziers as the
+  CSS tokens; `EASE.*` in `lib/motion.ts` are those names. CSS and GSAP motion
+  are now the *same* curves, not library approximations.
+- **Optical display tracking** — display sizes tighten as they grow
+  (`-0.042em` / `-0.032em` / `-0.022em` for xl/lg/md): typeset, not sized.
+- **Selection color** — `.nh-marketing ::selection` is brand indigo, not
+  browser blue.
+- **Ledger panel idiom** — sections that present grouped facts (TrustBand,
+  Metrics) use *one* glass panel divided by `border-white/[0.06]` hairlines
+  with a faint top-left brand wash — not N identical cards. Prefer this over
+  card grids when the content is a set, not alternatives.
+- **AA floor** — `ink-subtle` is decorative-only on the landing (aria-hidden
+  ornaments). All informational text ≤14px uses `ink-muted` or brighter.
+
 ## Component API guarantee
 
 `components/ui/*` public APIs are frozen through the overhaul. Phase 1 added only

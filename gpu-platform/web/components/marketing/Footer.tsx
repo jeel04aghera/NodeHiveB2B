@@ -56,14 +56,16 @@ export function MarketingFooter() {
               Secure GPU workstations for your team, on hardware you control — wherever your people work.
             </p>
             <p className="mt-5 inline-flex items-center gap-2 rounded-full border border-line px-3 py-1.5 text-xs text-ink-muted">
-              <ShieldCheck size={13} className="text-accent" aria-hidden />
+              <ShieldCheck size={13} className="text-brand-cyan" aria-hidden />
               mTLS · hashed credentials · audit logged · role-based access
             </p>
           </div>
 
           {COLUMNS.map((col) => (
             <nav key={col.heading} aria-label={col.heading}>
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-ink-subtle">{col.heading}</h3>
+              {/* Not a heading: the nav's aria-label names the group, and 12px
+                  ink-subtle headings failed AA. Styled label + ink-muted instead. */}
+              <div className="text-xs font-semibold uppercase tracking-wider text-ink-muted">{col.heading}</div>
               <ul className="mt-4 space-y-2.5">
                 {col.links.map((l) => (
                   <li key={l.label}>
@@ -80,7 +82,7 @@ export function MarketingFooter() {
           ))}
         </div>
 
-        <div className="mt-12 flex flex-col items-start justify-between gap-3 border-t border-line pt-6 text-xs text-ink-subtle sm:flex-row sm:items-center">
+        <div className="mt-12 flex flex-col items-start justify-between gap-3 border-t border-line pt-6 text-xs text-ink-muted sm:flex-row sm:items-center">
           <span>© {new Date().getFullYear()} NodeHive. All rights reserved.</span>
           <span>Built for IT &amp; engineering teams that own their GPUs.</span>
         </div>

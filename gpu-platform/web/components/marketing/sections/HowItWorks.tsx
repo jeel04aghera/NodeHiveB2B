@@ -46,7 +46,7 @@ function VisualProvision() {
           className="flex items-center justify-between rounded-lg border border-line bg-subtle/80 px-4 py-3"
         >
           <span className="flex items-center gap-2.5 font-mono text-xs text-ink">
-            <span className={`h-1.5 w-1.5 rounded-full ${i < 2 ? "bg-accent" : "bg-accent animate-nh-pulse"}`} aria-hidden />
+            <span className={`h-1.5 w-1.5 rounded-full ${i < 2 ? "bg-accent" : "bg-accent motion-safe:animate-nh-pulse"}`} aria-hidden />
             {n}
           </span>
           <span className="rounded-full border border-line px-2 py-0.5 text-[10px] uppercase tracking-wide text-ink-muted">
@@ -147,12 +147,18 @@ export function HowItWorks() {
       const steps = Array.from(root.querySelectorAll<HTMLElement>("[data-step]"));
       const visuals = Array.from(root.querySelectorAll<HTMLElement>("[data-visual-deck] [data-visual]"));
       const rail = root.querySelector<HTMLElement>("[data-rail-fill]");
+      const railTrack = root.querySelector<HTMLElement>("[data-rail]");
+      const railDot = root.querySelector<HTMLElement>("[data-rail-dot]");
+      const glows = Array.from(root.querySelectorAll<HTMLElement>("[data-step-glow]"));
 
       // Convert the static visual stack into an absolute cross-fade deck.
-      gsap.set("[data-visual-deck]", { position: "relative", height: 340 });
-      gsap.set(visuals, { position: "absolute", inset: 0, autoAlpha: 0, y: 16 });
-      gsap.set(visuals[0], { autoAlpha: 1, y: 0 });
+      // Height = the tallest card, measured while still in flow — no dead space.
+      const deckH = Math.max(...visuals.map((v) => v.offsetHeight));
+      gsap.set("[data-visual-deck]", { position: "relative", height: deckH });
+      gsap.set(visuals, { position: "absolute", inset: 0, autoAlpha: 0, y: 18, scale: 0.985, transformOrigin: "center top" });
+      gsap.set(visuals[0], { autoAlpha: 1, y: 0, scale: 1 });
       gsap.set(steps.slice(1), { opacity: 0.38 });
+      if (glows[0]) gsap.set(glows[0], { opacity: 1 });
       gsap.set(rail, { scaleY: 0, transformOrigin: "top" });
 
       const tl = gsap.timeline({
@@ -166,13 +172,22 @@ export function HowItWorks() {
         },
       });
       tl.to(rail, { scaleY: 1, duration: 3 }, 0);
+      // Comet head rides the rail fill's leading edge (separate element — the
+      // fill is scaleY'd, which would squash anything inside it).
+      if (railDot && railTrack) {
+        gsap.set(railDot, { autoAlpha: 1 });
+        tl.to(railDot, { y: railTrack.offsetHeight - 6, duration: 3 }, 0);
+      }
+      const FADE = 0.18; // short overlap — outgoing and incoming never double-expose
       STEPS.forEach((_, i) => {
         if (i === 0) return;
-        const at = i - 0.35; // overlap the cross-fade into each scrub segment
-        tl.to(visuals[i - 1], { autoAlpha: 0, y: -16, duration: 0.35 }, at);
-        tl.to(visuals[i], { autoAlpha: 1, y: 0, duration: 0.35 }, at);
-        tl.to(steps[i - 1], { opacity: 0.38, duration: 0.35 }, at);
-        tl.to(steps[i], { opacity: 1, duration: 0.35 }, at);
+        const at = i - FADE;
+        tl.to(visuals[i - 1], { autoAlpha: 0, y: -14, scale: 0.985, duration: FADE }, at);
+        tl.to(visuals[i], { autoAlpha: 1, y: 0, scale: 1, duration: FADE }, at);
+        tl.to(steps[i - 1], { opacity: 0.38, duration: FADE }, at);
+        tl.to(steps[i], { opacity: 1, duration: FADE }, at);
+        if (glows[i - 1]) tl.to(glows[i - 1], { opacity: 0, duration: FADE }, at);
+        if (glows[i]) tl.to(glows[i], { opacity: 1, duration: FADE }, at);
       });
     });
 
@@ -200,13 +215,31 @@ export function HowItWorks() {
 
         <div data-pin className="mt-16 lg:grid lg:grid-cols-2 lg:items-center lg:gap-16">
           <ol className="relative space-y-10 lg:space-y-12">
-            {/* Progress rail (desktop): gradient fill scrubs with the timeline. */}
-            <div aria-hidden className="absolute bottom-2 left-[19px] top-2 hidden w-px bg-line lg:block">
-              <div data-rail-fill className="h-full w-full bg-gradient-brand" />
+            {/* Progress rail (desktop): gradient fill + comet head scrub with
+                the timeline. The fill glows so progress reads at a glance. */}
+            <div
+              aria-hidden
+              data-rail
+              className="absolute bottom-2 left-[19px] top-2 hidden w-px bg-white/[0.08] lg:block"
+            >
+              <div
+                data-rail-fill
+                className="h-full w-full bg-gradient-brand shadow-[0_0_12px_rgb(var(--grad-b)/0.55)]"
+              />
+              <div
+                data-rail-dot
+                className="absolute -left-[2.5px] top-0 h-1.5 w-1.5 rounded-full bg-brand-cyan opacity-0 shadow-[0_0_10px_2px_rgb(var(--grad-c)/0.5)]"
+              />
             </div>
             {STEPS.map(({ icon: Icon, title, desc }, i) => (
               <li key={title} data-step className="relative flex gap-5 lg:pl-0">
                 <div className="glass relative z-10 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-brand-cyan">
+                  {/* Brand ring that lights up while this step is active (desktop scrub). */}
+                  <span
+                    data-step-glow
+                    aria-hidden
+                    className="absolute inset-0 rounded-lg opacity-0 shadow-[0_0_0_1px_rgb(var(--grad-b)/0.5),0_0_16px_-2px_rgb(var(--grad-b)/0.6)]"
+                  />
                   <Icon size={18} aria-hidden />
                 </div>
                 <div>

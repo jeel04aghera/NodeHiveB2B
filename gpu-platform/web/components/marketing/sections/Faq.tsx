@@ -53,7 +53,9 @@ function FaqItem({ q, a }: { q: string; a: string }) {
           <ChevronDown
             size={18}
             aria-hidden
-            className={`shrink-0 text-ink-muted transition-transform duration-200 ease-snappy ${open ? "rotate-180" : ""}`}
+            className={`shrink-0 transition-[transform,color] duration-200 ease-snappy ${
+              open ? "rotate-180 text-brand-cyan" : "text-ink-muted"
+            }`}
           />
         </button>
       </h3>

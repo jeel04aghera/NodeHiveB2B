@@ -22,7 +22,9 @@ export const metadata = {
 
 export default function LandingPage() {
   return (
-    <div className="bg-canvas font-body text-ink">
+    <div className="nh-marketing bg-canvas font-body text-ink">
+      {/* Film grain over every section — kills the flat-vector look (texture pass). */}
+      <div aria-hidden className="grain" />
       <a
         href="#main"
         className="sr-only z-50 rounded-md bg-surface px-4 py-2 text-sm text-ink focus:not-sr-only focus:fixed focus:left-4 focus:top-4"

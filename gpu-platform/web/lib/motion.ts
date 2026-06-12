@@ -21,10 +21,17 @@ export const EASE_CSS = {
   snappy: "cubic-bezier(0.5, 0, 0.15, 1)",
 } as const;
 
-/** Easing — GSAP-native names approximating the CSS curves above. */
+/**
+ * Easing — CustomEase names registered by the marketing orchestrator
+ * (components/marketing/useGsap.ts) from the exact CSS curves, so GSAP and CSS
+ * share one set of hand-tuned curves instead of nearest library approximations.
+ * Only valid inside a `useGsap` setup callback (registration happens at load).
+ */
 export const EASE = {
-  expressive: "power4.out",
-  snappy: "power2.inOut",
+  expressive: "nh-expressive", // = --ease-expressive
+  snappy: "nh-snappy", // = --ease-snappy
+  /** Long-tail settle for hero/headline moves — slightly softer than expressive. */
+  hero: "nh-hero",
 } as const;
 
 /** Stagger steps in seconds for grouped entrances (cards, list rows, nav items). */
