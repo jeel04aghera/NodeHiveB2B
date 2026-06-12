@@ -95,7 +95,17 @@ export function DeveloperApi() {
 
   return (
     <section ref={root} id="developers" className="relative scroll-mt-24 py-24 sm:py-28">
-      <div className="mx-auto max-w-6xl px-6">
+      {/* Section light field — ties the terminal side back to the hero's brand
+          light instead of floating in flat black. Multi-stop falloff, no haze. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background:
+            "radial-gradient(52rem 30rem at 78% 32%, rgb(var(--grad-b) / 0.07), rgb(var(--grad-b) / 0.025) 45%, transparent 70%), radial-gradient(34rem 22rem at 8% 88%, rgb(var(--grad-a) / 0.05), transparent 70%)",
+        }}
+      />
+      <div className="relative mx-auto max-w-6xl px-6">
         <div className="grid items-center gap-14 lg:grid-cols-2">
           <div>
             <SectionHeading

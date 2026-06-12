@@ -38,18 +38,24 @@ export function FinalCta() {
 
   return (
     <section ref={root} className="relative px-6 pb-28 pt-8">
-      <div data-panel className="gradient-border relative mx-auto max-w-5xl overflow-hidden rounded-2xl">
+      <div data-panel className="gradient-border-soft relative mx-auto max-w-5xl overflow-hidden rounded-2xl">
         <div className="bg-mesh relative px-8 py-16 text-center sm:px-12 sm:py-20">
           {/* Drifting accent glows — decorative, paused under reduced motion. */}
           <div
             aria-hidden
             className="absolute -left-16 -top-16 h-56 w-56 rounded-full opacity-50 motion-safe:animate-nh-float"
-            style={{ background: "radial-gradient(closest-side, rgb(var(--grad-a) / 0.35), transparent)" }}
+            style={{
+              background:
+                "radial-gradient(closest-side, rgb(var(--grad-a) / 0.3), rgb(var(--grad-a) / 0.1) 45%, transparent 78%)",
+            }}
           />
           <div
             aria-hidden
             className="absolute -bottom-20 -right-12 h-64 w-64 rounded-full opacity-50 motion-safe:animate-nh-float [animation-delay:-4.5s]"
-            style={{ background: "radial-gradient(closest-side, rgb(var(--grad-c) / 0.28), transparent)" }}
+            style={{
+              background:
+                "radial-gradient(closest-side, rgb(var(--grad-c) / 0.24), rgb(var(--grad-c) / 0.08) 45%, transparent 78%)",
+            }}
           />
 
           <h2 data-reveal className="relative mx-auto max-w-2xl font-display text-display-lg text-ink">
@@ -62,18 +68,18 @@ export function FinalCta() {
           <div data-reveal className="relative mt-9 flex flex-wrap items-center justify-center gap-3.5">
             <a
               href="mailto:demo@nodehive.cloud?subject=NodeHive%20demo"
-              className="inline-flex h-11 items-center gap-2 rounded-md bg-gradient-brand px-6 text-sm font-medium text-white shadow-glow-brand transition-[box-shadow,filter] duration-150 ease-snappy hover:shadow-glow-brand-lg hover:brightness-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-indigo/60"
+              className="inline-flex h-11 items-center gap-2 rounded-lg bg-gradient-brand px-6 text-sm font-medium text-white shadow-glow-brand transition-[box-shadow,filter] duration-150 ease-snappy hover:shadow-glow-brand-lg hover:brightness-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-indigo/60"
             >
               Book a demo <ArrowRight size={16} aria-hidden />
             </a>
             <Link
               href="/signup"
-              className="glass inline-flex h-11 items-center rounded-md px-6 text-sm font-medium text-ink transition-colors duration-150 ease-snappy hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-indigo/60"
+              className="glass inline-flex h-11 items-center rounded-lg px-6 text-sm font-medium text-ink transition-colors duration-150 ease-snappy hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-indigo/60"
             >
               Start a free trial
             </Link>
           </div>
-          <p data-reveal className="relative mt-5 text-xs text-ink-subtle">
+          <p data-reveal className="relative mt-5 text-xs text-ink-muted">
             Free on up to 2 GPUs — no card, no procurement cycle.
           </p>
         </div>

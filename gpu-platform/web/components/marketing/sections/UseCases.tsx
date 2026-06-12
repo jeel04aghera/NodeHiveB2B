@@ -60,15 +60,17 @@ export function UseCases() {
           title="One fleet, every way your team works"
           lede="The same private cloud covers the everyday and the exceptional."
         />
-        <div data-cards className="mt-14 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        {/* Deliberate 3 + 2 bento — three focused cells, then two wide cells.
+            No orphan; the wide pair reads as a decision, not a leftover row. */}
+        <div data-cards className="mt-14 grid gap-5 sm:grid-cols-2 lg:grid-cols-6">
           {CASES.map(({ icon: Icon, title, desc }, i) => (
             <article
               key={title}
               data-card
               onPointerMove={setSpotlight}
-              className={`group relative overflow-hidden rounded-xl border border-line bg-surface p-6 transition-[border-color,box-shadow,transform] duration-150 ease-snappy hover:-translate-y-0.5 hover:border-brand-indigo/40 hover:shadow-glow-brand ${
-                i === 4 ? "sm:col-span-2 lg:col-span-1" : ""
-              }`}
+              className={`group glass relative overflow-hidden rounded-xl p-6 transition-[border-color,box-shadow,transform] duration-150 ease-snappy hover:-translate-y-0.5 hover:border-brand-indigo/40 hover:shadow-glow-brand ${
+                i < 3 ? "lg:col-span-2" : "lg:col-span-3"
+              } ${i === 4 ? "sm:col-span-2 lg:col-span-3" : ""}`}
             >
               {/* Cursor spotlight + sheen, GPU-cheap (opacity-only transition). */}
               <div
@@ -80,11 +82,11 @@ export function UseCases() {
                 }}
               />
               <div className="relative">
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-brand-violet/15 text-brand-cyan ring-1 ring-inset ring-brand-violet/25">
-                  <Icon size={19} aria-hidden />
+                <div className="flex items-center gap-3">
+                  <Icon size={18} className="shrink-0 text-brand-cyan" aria-hidden />
+                  <h3 className="font-display text-base font-semibold text-ink">{title}</h3>
                 </div>
-                <h3 className="mt-4 font-display text-base font-semibold text-ink">{title}</h3>
-                <p className="mt-2 text-sm leading-relaxed text-ink-muted">{desc}</p>
+                <p className="mt-2.5 max-w-md text-sm leading-relaxed text-ink-muted">{desc}</p>
               </div>
             </article>
           ))}

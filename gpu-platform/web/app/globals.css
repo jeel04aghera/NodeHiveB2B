@@ -108,6 +108,23 @@
       var(--gradient-brand) border-box;
   }
 
+  /* Softened gradient border for large panels (FinalCta): same two-layer trick
+     as .gradient-border, but the gradient sits at ~50% alpha so a 1px ring on a
+     20rem-wide panel reads as an edge catching light, not a neon outline. Keep
+     full-brightness .gradient-border for small elements (plan cards, chips). */
+  .gradient-border-soft {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(rgb(var(--c-surface)), rgb(var(--c-surface))) padding-box,
+      linear-gradient(
+          135deg,
+          rgb(var(--grad-a) / 0.55) 0%,
+          rgb(var(--grad-b) / 0.45) 45%,
+          rgb(var(--grad-c) / 0.55) 100%
+        )
+        border-box;
+  }
+
   /* Hairline infrastructure grid (Phase 2) — pure-CSS overlay for sections that
      want a faint "fabric" texture behind glass cards. Pair with a mask so it
      fades out instead of ending abruptly. */

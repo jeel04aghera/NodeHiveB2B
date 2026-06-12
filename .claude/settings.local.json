@@ -265,7 +265,10 @@
       "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --window-size=390,844 --hide-scrollbars --timeout=15000 --screenshot=/tmp/nh-elevate/before/mobile-hero.png http://localhost:3456/)",
       "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --window-size=390,9500 --hide-scrollbars --timeout=20000 --screenshot=/tmp/nh-elevate/before/mobile-full.png http://localhost:3456/)",
       "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --window-size=1440,8500 --hide-scrollbars --force-prefers-reduced-motion --timeout=12000 --screenshot=/tmp/nh-elevate/before/desktop-full-rm.png http://localhost:3456/)",
-      "Bash(sips -g pixelWidth -g pixelHeight desktop-full.png mobile-full.png)"
+      "Bash(sips -g pixelWidth -g pixelHeight desktop-full.png mobile-full.png)",
+      "Bash(sed -n '1,25p' /tmp/nh-shot/strips.js)",
+      "Bash(sed -n '1,20p' /tmp/nh-shot/clip.js)",
+      "Bash(python3 *)"
     ]
   }
 }
