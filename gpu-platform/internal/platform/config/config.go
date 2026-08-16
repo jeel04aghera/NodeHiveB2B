@@ -61,8 +61,8 @@ type EmailConfig struct {
 func (e EmailConfig) Enabled() bool { return e.ResendAPIKey != "" && e.FromEmail != "" }
 
 // BillingConfig governs monetization enforcement (Billing P0). Production defaults
-// fail CLOSED: admission enforced, no welcome credits, no self-serve top-ups —
-// operators opt OUT for advisory/internal-chargeback deployments, never the reverse.
+// fail CLOSED — admission enforced, no welcome credits — with one deliberate
+// exception while the product is pre-monetization: AllowSelfTopup (below).
 type BillingConfig struct {
 	// Enforce gates workload launches on credit balance + budgets (BILLING_ENFORCE,
 	// default true).
@@ -71,7 +71,9 @@ type BillingConfig struct {
 	// in production / 50000 in dev so local onboarding still works out of the box).
 	WelcomeCredit float64
 	// AllowSelfTopup enables POST /billing/credits/topup (BILLING_ALLOW_SELF_TOPUP,
-	// default false in production / true in dev).
+	// default TRUE in every environment during the demo phase — see Load). This is
+	// the one setting here that does not fail closed: with no payment provider
+	// integrated, it is how credit enters the ledger at all.
 	AllowSelfTopup bool
 }
 
@@ -169,9 +171,17 @@ func Load() (Config, error) {
 		devWelcome = 50000
 	}
 	c.Billing = BillingConfig{
-		Enforce:        envBool("BILLING_ENFORCE", true),
-		WelcomeCredit:  envFloat("WELCOME_CREDIT", devWelcome),
-		AllowSelfTopup: envBool("BILLING_ALLOW_SELF_TOPUP", c.IsDev()),
+		Enforce:       envBool("BILLING_ENFORCE", true),
+		WelcomeCredit: envFloat("WELCOME_CREDIT", devWelcome),
+		// Demo phase: self-serve top-up is ON by default, in every environment.
+		// There is no payment provider yet, so this endpoint IS the credit source —
+		// an authenticated user funds their own org's ledger directly. It stays
+		// org-scoped and admin-gated (see topupCredits), so it grants no reach the
+		// caller did not already have; what it does grant is credit that nobody
+		// paid for. Flip it off with BILLING_ALLOW_SELF_TOPUP=false the moment a
+		// real gateway lands — the gateway's webhook should then be the only
+		// caller of billing.AddCredit for 'topup' entries.
+		AllowSelfTopup: envBool("BILLING_ALLOW_SELF_TOPUP", true),
 	}
 	logFormat := "json"
 	if c.IsDev() {

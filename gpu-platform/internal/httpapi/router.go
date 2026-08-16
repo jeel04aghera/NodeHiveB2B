@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -107,6 +108,11 @@ func WithEmailSender(s email.Sender) Option { return func(a *API) { a.email = s 
 
 // WithSelfTopup enables the self-serve credit top-up endpoint (dev/self-host only).
 func WithSelfTopup(b bool) Option { return func(a *API) { a.allowSelfTopup = b } }
+
+// emailEnabled reports whether a real email provider is wired up. False means the
+// console fallback is in play (nothing actually leaves the process), so any UI that
+// tells a user to "check your inbox" would be lying — see (*API).config.
+func (a *API) emailEnabled() bool { return a.email != nil && a.email.Enabled() }
 
 // WithAgentTransport describes the agent gateway's transport so the installer and
 // the CA endpoint render the matching agent configuration. caPEM may be nil
@@ -1100,6 +1106,18 @@ func (a *API) creditLedger(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, entries)
 }
 
+// topupCredits credits the CALLER'S OWN organization. Demo-phase mechanism: there
+// is no payment gateway, so an admin funds their own ledger directly and no money
+// changes hands. Two properties hold regardless, and must survive a gateway swap:
+// the org is taken from the authenticated session (never from the request body, so
+// no caller can reach another tenant's ledger), and the write goes through
+// billing.AddCredit, which is transactional and org-locked.
+//
+// Replacing this with a real provider: keep AddCredit as-is, move the call behind a
+// payment-webhook handler that has verified a completed charge, and set
+// BILLING_ALLOW_SELF_TOPUP=false to retire this endpoint. The ledger's 'topup' kind
+// and the billing.topup audit event stay meaningful across that change; the only
+// thing that moves is who is trusted to trigger the credit.
 func (a *API) topupCredits(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
 	if !a.allowSelfTopup {
@@ -1122,9 +1140,26 @@ func (a *API) topupCredits(w http.ResponseWriter, r *http.Request) {
 	if body.Description == "" {
 		body.Description = "Credit top-up"
 	}
+	// Validate here rather than leaning on AddCredit's error string: a bad amount is
+	// the client's fault (400) while a ledger write that fails is ours (500), and the
+	// two must not collapse into one opaque message. NaN/Inf survive JSON decoding as
+	// float64 only via literals Go rejects, but the guard is cheap and keeps a
+	// non-finite value from ever reaching a numeric(14,4) column.
+	if math.IsNaN(body.Amount) || math.IsInf(body.Amount, 0) || body.Amount <= 0 {
+		writeErr(w, 400, "validation", "amount must be a positive number")
+		return
+	}
+	// The ledger column is numeric(14,4): ten integral digits. A larger top-up would
+	// fail inside the transaction with a driver-level overflow error; reject it here
+	// with a message the user can act on.
+	if body.Amount > 1e9 {
+		writeErr(w, 400, "validation", "amount exceeds the maximum single top-up of 1,000,000,000")
+		return
+	}
 	balance, err := a.billing.AddCredit(r.Context(), u.OrgID, body.Amount, "topup", body.Description)
 	if err != nil {
-		writeErr(w, 400, "validation", err.Error())
+		a.logger().Error("credit top-up failed", "org_id", u.OrgID, "amount", body.Amount, "err", err)
+		writeErr(w, 500, "internal", "could not add credits; please try again")
 		return
 	}
 	a.userEvent(r, u, "billing.topup", "credit_ledger", "", map[string]any{

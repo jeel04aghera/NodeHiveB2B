@@ -212,7 +212,11 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        {user.email_verified === false && <VerifyEmailBanner />}
+        {/* Only nudge when a verification mail can actually be delivered. With no email
+            provider configured the link never leaves the process, so the banner would
+            block nothing and simply mislead. Wire RESEND_API_KEY + INVITE_FROM_EMAIL and
+            the control plane flips this flag back on by itself. */}
+        {cfg?.email_verification_enabled && user.email_verified === false && <VerifyEmailBanner />}
 
         <main className="flex-1 px-8 py-7">
           <div className="mx-auto max-w-[1440px]">{children}</div>

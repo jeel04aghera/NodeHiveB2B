@@ -102,6 +102,11 @@ export interface DeploymentConfig {
   synthetic_gpu_count: number;
   total_gpu_count: number;
   disclaimer: string;
+  // Capability flags: what this deployment actually has wired up. Optional so an
+  // older control plane (which omits them) degrades to "off" rather than showing
+  // an affordance that would only fail.
+  self_topup_enabled?: boolean;
+  email_verification_enabled?: boolean;
 }
 
 export interface EnrollmentToken {

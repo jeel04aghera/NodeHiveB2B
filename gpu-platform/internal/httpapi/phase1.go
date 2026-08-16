@@ -15,7 +15,17 @@ import (
 // ── Deployment config (dev-mode visibility) ───────────────────────────────────
 
 // config tells the frontend whether this deployment is running on synthetic
-// (development) GPUs so it can show an unmistakable banner / badges.
+// (development) GPUs so it can show an unmistakable banner / badges. It also
+// advertises the optional capabilities this deployment actually has wired up, so
+// the UI can hide affordances that would only ever fail:
+//
+//   - self_topup_enabled mirrors BILLING_ALLOW_SELF_TOPUP. Off means there is no
+//     payment provider and POST /billing/credits/topup answers 403; the billing
+//     page renders the "contact your operator" state instead of dead buttons.
+//   - email_verification_enabled is true only when an email provider (Resend) is
+//     configured. Off means a verification link can never reach the user's inbox,
+//     so the UI must not ask them to verify. Configure RESEND_API_KEY +
+//     INVITE_FROM_EMAIL and the prompt returns on its own — nothing to re-code.
 func (a *API) config(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r)
 	gpus, _ := a.inventory.ListGPUs(r.Context(), u.OrgID, "")
@@ -27,10 +37,12 @@ func (a *API) config(w http.ResponseWriter, r *http.Request) {
 	}
 	devMode := synthetic > 0
 	writeJSON(w, 200, map[string]any{
-		"dev_mode":            devMode,
-		"synthetic_gpu_count": synthetic,
-		"total_gpu_count":     total,
-		"disclaimer":          "Synthetic GPUs are simulated for development. Metrics are generated, not measured. Not production hardware.",
+		"dev_mode":                   devMode,
+		"synthetic_gpu_count":        synthetic,
+		"total_gpu_count":            total,
+		"disclaimer":                 "Synthetic GPUs are simulated for development. Metrics are generated, not measured. Not production hardware.",
+		"self_topup_enabled":         a.allowSelfTopup,
+		"email_verification_enabled": a.emailEnabled(),
 	})
 }
 

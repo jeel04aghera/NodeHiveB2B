@@ -436,7 +436,7 @@ func (a *API) requestEmailVerification(w http.ResponseWriter, r *http.Request) {
 	a.dispatchAuthEmail(email.BuildVerifyEmail(user.Email, verifyURL))
 	a.userEvent(r, u, "auth.email_verify_requested", "user", u.ID.String(), nil)
 	resp := map[string]any{"sent": true}
-	if a.email == nil || !a.email.Enabled() {
+	if !a.emailEnabled() {
 		// Dev fallback (same contract as invitations): surface the link directly.
 		resp["token"] = raw
 		resp["verify_url"] = verifyURL
